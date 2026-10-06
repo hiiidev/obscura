@@ -5219,8 +5219,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn indexeddb_later_transaction_reads_committed_write() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn indexeddb_later_transaction_reads_committed_write() {
         let mut page = network_idle_test_page();
         page.evaluate(r#"(() => {
             globalThis.__idbRegression = null;
@@ -5238,6 +5238,12 @@ mod tests {
             };
             return true;
         })()"#);
+        page.js
+            .as_mut()
+            .unwrap()
+            .run_event_loop()
+            .await
+            .expect("IndexedDB callbacks should drain");
         assert_eq!(page.evaluate("__idbRegression"), serde_json::json!(42));
 
         // The same state is also BrowserContext-owned, so replacing the page
@@ -5258,6 +5264,12 @@ mod tests {
             };
             return true;
         })()"#);
+        page.js
+            .as_mut()
+            .unwrap()
+            .run_event_loop()
+            .await
+            .expect("restored IndexedDB callbacks should drain");
         assert_eq!(page.evaluate("__idbReload"), serde_json::json!(42));
     }
 
