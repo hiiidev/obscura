@@ -399,6 +399,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pages_in_one_browser_context_share_fingerprint_surfaces() {
+        let mut ctx = CdpContext::new();
+        let context_id = ctx.create_browser_context();
+        let first_page = ctx
+            .create_page_in_context(Some(&context_id))
+            .expect("first page should be created");
+        let second_page = ctx
+            .create_page_in_context(Some(&context_id))
+            .expect("second page should be created");
+
+        let expression = "return [screen.width, screen.height, navigator.hardwareConcurrency, navigator.deviceMemory, performance.memory.totalJSHeapSize, performance.memory.usedJSHeapSize];";
+        let first = ctx
+            .get_page_mut(&first_page)
+            .expect("first page should exist")
+            .evaluate(expression);
+        let second = ctx
+            .get_page_mut(&second_page)
+            .expect("second page should exist")
+            .evaluate(expression);
+
+        assert_eq!(first, second);
+    }
+
+    #[tokio::test]
     async fn disposing_context_removes_only_its_pages() {
         let mut ctx = CdpContext::new();
         let context_id = ctx.create_browser_context();
