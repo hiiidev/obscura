@@ -1832,11 +1832,22 @@ impl Page {
         };
         let local = Self::read_web_storage(js, "localStorage");
         let session = Self::read_web_storage(js, "sessionStorage");
+        let indexed_db = js
+            .evaluate("globalThis.__obscura_idb_export?.() ?? '[]'")
+            .ok()
+            .and_then(|value| value.as_str().map(ToOwned::to_owned));
         self.context
             .local_storage
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(origin.clone(), local);
+        if let Some(indexed_db) = indexed_db {
+            self.context
+                .indexed_db_storage
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(origin.clone(), indexed_db);
+        }
         self.session_storage.insert(origin, session);
     }
 
@@ -1859,12 +1870,23 @@ impl Page {
             .unwrap_or_default();
         let local_json = serde_json::to_string(&local).unwrap_or_else(|_| "{}".to_string());
         let session_json = serde_json::to_string(&session).unwrap_or_else(|_| "{}".to_string());
+        let indexed_db = self
+            .context
+            .indexed_db_storage
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&origin)
+            .cloned()
+            .unwrap_or_else(|| "[]".to_string());
+        let indexed_db_json =
+            serde_json::to_string(&indexed_db).unwrap_or_else(|_| ""[]"".to_string());
         let source = format!(
             r#"(function() {{
                 const local = {local_json};
                 const session = {session_json};
                 for (const [key, value] of Object.entries(local)) localStorage.setItem(key, value);
                 for (const [key, value] of Object.entries(session)) sessionStorage.setItem(key, value);
+                globalThis.__obscura_idb_import?.({indexed_db_json});
             }})()"#
         );
         let _ = rt.execute_script("<restore-web-storage>", &source);
