@@ -60,6 +60,9 @@ pub struct BrowserContext {
     /// localStorage is owned by the BrowserContext and partitioned by origin,
     /// matching the sharing boundary used by pages in one browser context.
     pub(crate) local_storage: Mutex<HashMap<String, HashMap<String, String>>>,
+    /// Serialized state for the lightweight IndexedDB shim, partitioned by
+    /// origin and owned by the BrowserContext like real IndexedDB storage.
+    pub(crate) indexed_db_storage: Mutex<HashMap<String, String>>,
     /// When true, the http client allows fetching localhost / RFC1918 /
     /// link-local addresses. Set via `--allow-private-network` (issue #33).
     /// Independent of `allow_file_access` because they cover different threat
@@ -198,6 +201,7 @@ impl BrowserContext {
             allow_file_access: false,
             storage_dir,
             local_storage: Mutex::new(HashMap::new()),
+            indexed_db_storage: Mutex::new(HashMap::new()),
             allow_private_network,
         }
     }
@@ -286,6 +290,14 @@ impl BrowserContext {
             storage_dir: persistent.then(|| self.storage_dir.clone()).flatten(),
             local_storage: Mutex::new(if persistent {
                 self.local_storage
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone()
+            } else {
+                HashMap::new()
+            }),
+            indexed_db_storage: Mutex::new(if persistent {
+                self.indexed_db_storage
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .clone()
