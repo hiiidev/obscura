@@ -5241,7 +5241,7 @@ mod tests {
         page.js
             .as_mut()
             .unwrap()
-            .run_event_loop()
+            .run_event_loop_bounded(100)
             .await
             .expect("IndexedDB callbacks should drain");
         assert_eq!(page.evaluate("__idbRegression"), serde_json::json!(42));
@@ -5267,7 +5267,7 @@ mod tests {
         page.js
             .as_mut()
             .unwrap()
-            .run_event_loop()
+            .run_event_loop_bounded(100)
             .await
             .expect("restored IndexedDB callbacks should drain");
         assert_eq!(page.evaluate("__idbReload"), serde_json::json!(42));
