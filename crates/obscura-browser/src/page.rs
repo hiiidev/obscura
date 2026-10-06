@@ -1879,7 +1879,7 @@ impl Page {
             .cloned()
             .unwrap_or_else(|| "[]".to_string());
         let indexed_db_json =
-            serde_json::to_string(&indexed_db).unwrap_or_else(|_| ""[]"".to_string());
+            serde_json::to_string(&indexed_db).unwrap_or_else(|_| "\"[]\"".to_string());
         let source = format!(
             r#"(function() {{
                 const local = {local_json};
