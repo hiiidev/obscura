@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use obscura_net::{CookieJar, ObscuraHttpClient, RobotsCache};
@@ -56,6 +57,9 @@ pub struct BrowserContext {
     /// itself from a web origin into file:// regardless of this flag.
     pub allow_file_access: bool,
     pub storage_dir: Option<PathBuf>,
+    /// localStorage is owned by the BrowserContext and partitioned by origin,
+    /// matching the sharing boundary used by pages in one browser context.
+    pub(crate) local_storage: Mutex<HashMap<String, HashMap<String, String>>>,
     /// When true, the http client allows fetching localhost / RFC1918 /
     /// link-local addresses. Set via `--allow-private-network` (issue #33).
     /// Independent of `allow_file_access` because they cover different threat
@@ -166,6 +170,7 @@ impl BrowserContext {
             stealth,
             allow_file_access: false,
             storage_dir,
+            local_storage: Mutex::new(HashMap::new()),
             allow_private_network,
         }
     }
@@ -236,6 +241,14 @@ impl BrowserContext {
             stealth: self.stealth,
             allow_file_access: self.allow_file_access,
             storage_dir: persistent.then(|| self.storage_dir.clone()).flatten(),
+            local_storage: Mutex::new(if persistent {
+                self.local_storage
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone()
+            } else {
+                HashMap::new()
+            }),
             allow_private_network: self.allow_private_network,
         }
     }
