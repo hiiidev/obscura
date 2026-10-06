@@ -140,13 +140,12 @@ pub async fn handle(
                 .and_then(Value::as_str)
                 .ok_or("Emulation.setUserAgentOverride requires userAgent")?;
             let accept_language = params.get("acceptLanguage").and_then(Value::as_str);
-            let http_client = ctx
+            let page = ctx
                 .get_session_page(session_id)
-                .ok_or("No page for session")?
-                .http_client
-                .clone();
+                .ok_or("No page for session")?;
+            let http_client = page.http_client.clone();
             if !user_agent.is_empty() {
-                http_client.set_user_agent(user_agent).await;
+                page.set_user_agent_override(user_agent).await;
                 if let Some(js) = ctx
                     .get_session_page_mut(session_id)
                     .and_then(|page| page.js.as_mut())
