@@ -21,7 +21,7 @@ const __obscuraCore = globalThis.Deno.core;
     '__obscura_errors', '__obscura_init', '__obscura_hide_list',
     '__obscura_objects', '__obscura_oid', '__obscura_ua',
     '__obscura_platform', '__obscura_ua_platform', '__obscura_ua_platform_version',
-    '__obscura_stealth', '__obscura_markTrusted', '__obscura_core_handoff',
+    '__obscura_stealth', '__obscura_fp_seed', '__obscura_markTrusted', '__obscura_core_handoff',
     // Created by later evaluation, input and emulation paths. Register them
     // before the snapshot hide list is captured, just like the other internals.
     '__obscura_await_rejected', '__obscura_click_target',
@@ -17227,7 +17227,12 @@ globalThis.__obscura_init = function() {
     _realmFrameId);
   _browserPostedTaskWakePending = false;
   for (const queue of _browserPostedTaskQueues) _browserPostedTaskDiscardQueue(queue);
-  _fpSeed = Date.now() ^ (Math.random() * 0xFFFFFFFF >>> 0);
+  // The embedding BrowserContext owns the fingerprint seed. Reusing it here
+  // keeps every Page, navigation and child frame in one browser context on the
+  // same synthetic device identity instead of randomizing per document load.
+  _fpSeed = Number.isFinite(globalThis.__obscura_fp_seed)
+    ? (globalThis.__obscura_fp_seed >>> 0)
+    : (Date.now() ^ (Math.random() * 0xFFFFFFFF >>> 0));
   _fpCache = null;
   // A real navigation just completed (this runs after set_url), so drop any
   // URL a location setter previewed synchronously and let document_url drive
