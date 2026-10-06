@@ -1154,6 +1154,15 @@ impl ObscuraHttpClient {
                 "cannot set proxy credentials without a configured proxy".to_string(),
             ));
         }
+        {
+            let current = self
+                .proxy_credentials
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if current.as_ref() == Some(&(username.clone(), password.clone())) {
+                return Ok(());
+            }
+        }
         if self.client.get().is_some() {
             return Err(ObscuraNetError::Network(
                 "proxy credentials arrived after the HTTP client was initialized".to_string(),
