@@ -15,6 +15,31 @@ use url::Url;
 use crate::cookies::{same_site, CookieJar, SameSiteContext};
 use crate::interceptor::{InterceptAction, RequestInterceptor};
 
+
+/// Reject malformed proxy configuration instead of silently falling back to a
+/// direct connection. A proxy must be an absolute URL with a supported scheme
+/// and a host; the transport parser gets the final say as well.
+pub fn validate_proxy_url(proxy: &str) -> Result<(), ObscuraNetError> {
+    let proxy = proxy.trim();
+    if proxy.is_empty() {
+        return Err(ObscuraNetError::Network("proxy URL is empty".to_string()));
+    }
+    let parsed = Url::parse(proxy)
+        .map_err(|error| ObscuraNetError::Network(format!("invalid proxy URL: {error}")))?;
+    if !matches!(parsed.scheme(), "http" | "https" | "socks5" | "socks5h") {
+        return Err(ObscuraNetError::Network(format!(
+            "unsupported proxy scheme '{}'",
+            parsed.scheme()
+        )));
+    }
+    if parsed.host_str().is_none() {
+        return Err(ObscuraNetError::Network("proxy URL has no host".to_string()));
+    }
+    reqwest::Proxy::all(proxy)
+        .map_err(|error| ObscuraNetError::Network(format!("invalid proxy URL: {error}")))?;
+    Ok(())
+}
+
 fn configured_root_paths() -> Vec<std::path::PathBuf> {
     let mut paths = Vec::new();
     if let Some(path) = std::env::var_os("SSL_CERT_FILE").filter(|path| !path.is_empty()) {
