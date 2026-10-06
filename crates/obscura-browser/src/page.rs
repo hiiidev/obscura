@@ -1813,6 +1813,7 @@ impl Page {
                 &self.context.ua_platform_version,
             );
         }
+        rt.set_fingerprint_seed(self.context.fingerprint_seed);
         if let Some(locale) = &self.locale_override {
             rt.set_locale(locale);
         }
