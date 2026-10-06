@@ -362,6 +362,58 @@ mod tests {
         rx
     }
 
+    #[tokio::test]
+    async fn proxy_auth_challenge_accepts_playwright_credentials() {
+        let context = std::sync::Arc::new(obscura_browser::BrowserContext::with_proxy(
+            "proxy-auth".to_string(),
+            Some("http://proxy.example:8080".to_string()),
+        ));
+        let mut ctx = CdpContext::new_with_shared_context(context.clone());
+        let page_id = ctx.create_page();
+        let session_id = Some("proxy-session".to_string());
+        ctx.sessions
+            .insert(session_id.clone().unwrap(), page_id.clone());
+
+        handle(
+            "enable",
+            &json!({"patterns": [], "handleAuthRequests": true}),
+            &mut ctx,
+            &session_id,
+        )
+        .await
+        .expect("Fetch.enable should succeed");
+
+        let event = ctx
+            .pending_events
+            .iter()
+            .find(|event| event.method == "Fetch.authRequired")
+            .expect("proxy context should emit an auth challenge");
+        assert_eq!(event.params["authChallenge"]["source"], "Proxy");
+        assert_eq!(event.session_id, session_id);
+        let request_id = event.params["requestId"].as_str().unwrap().to_string();
+
+        handle(
+            "continueWithAuth",
+            &json!({
+                "requestId": request_id,
+                "authChallengeResponse": {
+                    "response": "ProvideCredentials",
+                    "username": "alice",
+                    "password": "secret",
+                }
+            }),
+            &mut ctx,
+            &Some("proxy-session".to_string()),
+        )
+        .await
+        .expect("Fetch.continueWithAuth should install proxy credentials");
+
+        let effective = context.effective_proxy_url().expect("proxy URL");
+        let parsed = url::Url::parse(&effective).unwrap();
+        assert_eq!(parsed.username(), "alice");
+        assert_eq!(parsed.password(), Some("secret"));
+    }
+
     // Parity with server.rs handle_fetch_resolution: continueRequest must
     // forward the client's header overrides (route.continue({ headers })), not
     // drop them. See #919.
