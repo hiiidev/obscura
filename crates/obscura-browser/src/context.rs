@@ -342,6 +342,18 @@ mod tests {
         assert_eq!(ctx.user_agent, client_ua);
     }
 
+    #[cfg(feature = "stealth")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn stealth_context_uses_transport_user_agent_as_its_identity() {
+        let ctx = BrowserContext::with_options("stealth".to_string(), None, true);
+        assert_eq!(ctx.user_agent, obscura_net::STEALTH_USER_AGENT);
+        assert_eq!(
+            ctx.http_client.user_agent.read().await.as_str(),
+            obscura_net::STEALTH_USER_AGENT
+        );
+        assert_eq!(ctx.platform, obscura_net::STEALTH_NAVIGATOR_PLATFORM);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn with_options_keeps_default_user_agent() {
         let ctx = BrowserContext::with_options("test".to_string(), None, false);
