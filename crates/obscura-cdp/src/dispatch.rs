@@ -274,9 +274,17 @@ impl CdpContext {
     }
 
     pub fn create_browser_context(&mut self) -> String {
+        self.create_browser_context_with_proxy(None)
+    }
+
+    pub fn create_browser_context_with_proxy(&mut self, proxy_url: Option<String>) -> String {
         self.browser_context_counter += 1;
         let id = format!("context-{}", self.browser_context_counter);
-        let context = Arc::new(self.default_context.isolated_copy(id.clone(), false));
+        let effective_proxy = proxy_url.or_else(|| self.default_context.proxy_url.clone());
+        let context = Arc::new(
+            self.default_context
+                .isolated_copy_with_proxy(id.clone(), false, effective_proxy),
+        );
         self.browser_contexts.insert(id.clone(), context);
         id
     }
