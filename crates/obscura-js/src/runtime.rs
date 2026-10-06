@@ -913,12 +913,13 @@ impl ObscuraJsRuntime {
     ) {
         use deno_core::v8;
 
-        const IDENTITY_GLOBALS: [&str; 7] = [
+        const IDENTITY_GLOBALS: [&str; 8] = [
             "__obscura_ua",
             "__obscura_platform",
             "__obscura_ua_platform",
             "__obscura_ua_platform_version",
             "__obscura_stealth",
+            "__obscura_fp_seed",
             "__obscura_geo_lat",
             "__obscura_geo_lon",
         ];
@@ -1432,6 +1433,16 @@ impl ObscuraJsRuntime {
         let _ = self.execute_runtime_script(
             "<set-stealth>",
             format!("globalThis.__obscura_stealth = {};", enabled),
+        );
+    }
+
+    /// Pin all synthetic fingerprint surfaces to the owning BrowserContext.
+    /// This value is copied into child-frame realms and re-applied whenever a
+    /// Page creates a fresh runtime for a new document.
+    pub fn set_fingerprint_seed(&mut self, seed: u32) {
+        let _ = self.execute_runtime_script(
+            "<set-fingerprint-seed>",
+            format!("globalThis.__obscura_fp_seed = {seed};"),
         );
     }
 
