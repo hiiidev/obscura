@@ -303,6 +303,10 @@ pub struct Page {
     /// pending navigation that loads it. Committing that load moves the cursor
     /// to the entry instead of appending a new one.
     pending_history_traversal: std::sync::Mutex<Option<usize>>,
+    /// sessionStorage belongs to this top-level Page and is partitioned by
+    /// origin. It survives document replacement/reload but is never shared with
+    /// sibling pages in the same BrowserContext.
+    session_storage: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
     pub network_events: Vec<NetworkEvent>,
     response_bodies: std::collections::HashMap<String, StoredResponseBody>,
     response_body_order: std::collections::VecDeque<String>,
@@ -1121,6 +1125,7 @@ impl Page {
             history_index: 0,
             document_history_start: 0,
             pending_history_traversal: std::sync::Mutex::new(None),
+            session_storage: std::collections::HashMap::new(),
             network_events: Vec::new(),
             response_bodies: std::collections::HashMap::new(),
             response_body_order: std::collections::VecDeque::new(),
@@ -1746,6 +1751,89 @@ impl Page {
             .fetch_with_callbacks(url, Some(&self.callbacks))
             .await
     }
+    fn current_storage_origin(&self) -> Option<String> {
+        let url = self.url.as_ref()?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return None;
+        }
+        let origin = url.origin().ascii_serialization();
+        (origin != "null").then_some(origin)
+    }
+
+    fn read_web_storage(
+        js: &mut ObscuraJsRuntime,
+        name: &str,
+    ) -> std::collections::HashMap<String, String> {
+        let source = format!(
+            r#"(function() {{
+                const store = globalThis[{name:?}];
+                const out = Object.create(null);
+                for (let i = 0; i < store.length; i++) {{
+                    const key = store.key(i);
+                    if (key !== null) out[key] = store.getItem(key);
+                }}
+                return JSON.stringify(out);
+            }})()"#
+        );
+        let Ok(value) = js.evaluate(&source) else {
+            return std::collections::HashMap::new();
+        };
+        let Some(serialized) = value.as_str() else {
+            return std::collections::HashMap::new();
+        };
+        serde_json::from_str(serialized).unwrap_or_default()
+    }
+
+    /// Capture the outgoing document's storage before its V8 runtime is
+    /// replaced. localStorage is BrowserContext-owned; sessionStorage is
+    /// top-level-Page-owned.
+    fn snapshot_web_storage(&mut self) {
+        let Some(origin) = self.current_storage_origin() else {
+            return;
+        };
+        let Some(js) = self.js.as_mut() else {
+            return;
+        };
+        let local = Self::read_web_storage(js, "localStorage");
+        let session = Self::read_web_storage(js, "sessionStorage");
+        self.context
+            .local_storage
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(origin.clone(), local);
+        self.session_storage.insert(origin, session);
+    }
+
+    fn restore_web_storage(&self, rt: &mut ObscuraJsRuntime) {
+        let Some(origin) = self.current_storage_origin() else {
+            return;
+        };
+        let local = self
+            .context
+            .local_storage
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&origin)
+            .cloned()
+            .unwrap_or_default();
+        let session = self
+            .session_storage
+            .get(&origin)
+            .cloned()
+            .unwrap_or_default();
+        let local_json = serde_json::to_string(&local).unwrap_or_else(|_| "{}".to_string());
+        let session_json = serde_json::to_string(&session).unwrap_or_else(|_| "{}".to_string());
+        let source = format!(
+            r#"(function() {{
+                const local = {local_json};
+                const session = {session_json};
+                for (const [key, value] of Object.entries(local)) localStorage.setItem(key, value);
+                for (const [key, value] of Object.entries(session)) sessionStorage.setItem(key, value);
+            }})()"#
+        );
+        let _ = rt.execute_script("<restore-web-storage>", &source);
+    }
+
     fn init_js(&mut self) {
         // init_js is also the new-document path.  Only resume_js explicitly
         // takes these IDs out before entering here and restores them after the
@@ -1856,6 +1944,7 @@ impl Page {
 
         rt.set_navigation_timing(self.navigation_timing.clone());
         rt.run_page_init();
+        self.restore_web_storage(&mut rt);
         rt.set_reduced_motion(self.reduced_motion);
         let _ = rt.execute_script(
             "<device-metrics>",
@@ -3380,6 +3469,10 @@ impl Page {
     ) -> Result<(), PageError> {
         let url = Url::parse(url_str).map_err(|e| PageError::InvalidUrl(e.to_string()))?;
         self.navigation_timing = NavigationTiming::default();
+
+        // The old JS runtime is replaced at commit. Preserve origin-scoped Web
+        // Storage before self.url switches to the destination origin.
+        self.snapshot_web_storage();
 
         // The previous document's background loads end with the document.
         self.retire_render_resources();
