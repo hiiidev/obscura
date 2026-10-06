@@ -56,7 +56,8 @@ const __obscuraCore = globalThis.Deno.core;
     '_commonFonts', '_isXMLDocument', '_isValidPITarget', '_isHTMLEl',
     '_nodeList', '_rngNodeLength', '_rngNodeIndex', '_rngSame', '_rngRoot',
     '_rngAncestors', '_rngOrder', '_rngCmp', '_rngCheckOffset',
-    '_idbRequest', '_idbObjectStore', '_idbTransaction', '_idbDatabase',
+    '_idbRequest', '_idbNameList', '_idbObjectStore', '_idbTransaction', '_idbDatabase',
+    '_idbExportState', '_idbImportState', '__obscura_idb_export', '__obscura_idb_import',
     '_makeListenerBox',
     // WebIDL interfaces. A real browser exposes these on the global as
     // enumerable:false; here they were assigned with `globalThis.X = X`, which
@@ -15388,6 +15389,55 @@ globalThis.indexedDB = {
   databases() { return Promise.resolve(Array.from(_idbDatabases, ([name, state]) => ({ name, version: state.version }))); },
   cmp(a, b) { return a < b ? -1 : a > b ? 1 : 0; },
 };
+function _idbExportState() {
+  const databases = [];
+  for (const [name, state] of _idbDatabases) {
+    const stores = [];
+    for (const [storeName, data] of state.stores) {
+      const entries = [];
+      for (const [key, value] of data) {
+        try {
+          const encoded = JSON.stringify([key, value]);
+          if (encoded !== undefined) entries.push(JSON.parse(encoded));
+        } catch (e) {
+          // The lightweight shim cannot faithfully persist values such as
+          // BigInt or cyclic graphs yet. Keep the rest of the database rather
+          // than dropping every serializable entry.
+        }
+      }
+      stores.push([storeName, entries]);
+    }
+    databases.push({ name, version: state.version, stores });
+  }
+  return JSON.stringify(databases);
+}
+
+function _idbImportState(serialized) {
+  let databases;
+  try { databases = JSON.parse(String(serialized || '[]')); }
+  catch (e) { return false; }
+  if (!Array.isArray(databases)) return false;
+  _idbDatabases.clear();
+  for (const database of databases) {
+    if (!database || typeof database.name !== 'string') continue;
+    const stores = new Map();
+    for (const store of Array.isArray(database.stores) ? database.stores : []) {
+      if (!Array.isArray(store) || store.length < 2) continue;
+      const storeName = String(store[0]);
+      const entries = Array.isArray(store[1]) ? store[1] : [];
+      stores.set(storeName, new Map(entries.filter(entry => Array.isArray(entry) && entry.length >= 2)));
+    }
+    _idbDatabases.set(database.name, {
+      version: Number(database.version) || 1,
+      stores,
+    });
+  }
+  return true;
+}
+
+globalThis.__obscura_idb_export = _idbExportState;
+globalThis.__obscura_idb_import = _idbImportState;
+
 globalThis.IDBKeyRange = {
   only(v) { return { lower: v, upper: v, lowerOpen: false, upperOpen: false, includes(x) { return x === v; } }; },
   lowerBound(v, open) { return { lower: v, upper: null, lowerOpen: !!open, upperOpen: false, includes(x) { return open ? x > v : x >= v; } }; },
