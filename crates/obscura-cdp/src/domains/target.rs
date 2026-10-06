@@ -273,6 +273,10 @@ pub async fn handle(
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(ToOwned::to_owned);
+            if let Some(proxy) = proxy_server.as_deref() {
+                obscura_net::validate_proxy_url(proxy)
+                    .map_err(|error| format!("Invalid proxyServer: {error}"))?;
+            }
             let id = ctx.create_browser_context_with_proxy(proxy_server);
             Ok(json!({ "browserContextId": id }))
         }
