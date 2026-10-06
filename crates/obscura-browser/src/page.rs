@@ -1160,11 +1160,17 @@ impl Page {
             return;
         }
         let proxy_url = self.context.effective_proxy_url();
+        let user_agent = self
+            .http_client
+            .user_agent
+            .try_read()
+            .map(|value| value.clone())
+            .unwrap_or_else(|_| self.context.user_agent.clone());
         self.stealth_client = Some(Arc::new(StealthHttpClient::with_proxy_and_user_agent(
             self.context.cookie_jar.clone(),
             proxy_url.as_deref(),
             self.context.allow_private_network,
-            &self.context.user_agent,
+            &user_agent,
         )));
     }
 
