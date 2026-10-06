@@ -5239,6 +5239,26 @@ mod tests {
             return true;
         })()"#);
         assert_eq!(page.evaluate("__idbRegression"), serde_json::json!(42));
+
+        // The same state is also BrowserContext-owned, so replacing the page
+        // runtime (the part reload/navigation does) must keep it.
+        page.snapshot_web_storage();
+        page.js = None;
+        page.dom = Some(parse_html("<html><body>reloaded</body></html>"));
+        page.init_js();
+        page.evaluate(r#"(() => {
+            globalThis.__idbReload = null;
+            const request = indexedDB.open('regression-db', 1);
+            request.onsuccess = () => {
+                const get = request.result
+                    .transaction('items', 'readonly')
+                    .objectStore('items')
+                    .get('answer');
+                get.onsuccess = () => { globalThis.__idbReload = get.result?.value ?? null; };
+            };
+            return true;
+        })()"#);
+        assert_eq!(page.evaluate("__idbReload"), serde_json::json!(42));
     }
 
     #[cfg(feature = "render")]
