@@ -1,7 +1,35 @@
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use obscura_net::{CookieJar, ObscuraHttpClient, RobotsCache};
+
+static FINGERPRINT_SEED_BASE: OnceLock<u32> = OnceLock::new();
+static FINGERPRINT_SEED_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+/// Allocate one fingerprint seed per browser context.
+///
+/// The timestamp/process mix makes the sequence differ across process starts,
+/// while the odd Weyl increment guarantees distinct seeds within one process
+/// until the u32 counter wraps. A context keeps this seed for its full lifetime;
+/// every page, navigation, and child frame derives its spoofed surfaces from it.
+fn next_fingerprint_seed() -> u32 {
+    let base = *FINGERPRINT_SEED_BASE.get_or_init(|| {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        let mut value = nanos ^ ((std::process::id() as u64) << 32);
+        value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        value ^= value >> 31;
+        (value as u32) ^ ((value >> 32) as u32)
+    });
+    let index = FINGERPRINT_SEED_COUNTER.fetch_add(1, Ordering::Relaxed);
+    base.wrapping_add(index.wrapping_mul(0x9e37_79b9))
+}
 
 pub struct BrowserContext {
     pub id: String,
@@ -11,6 +39,9 @@ pub struct BrowserContext {
     pub platform: String,
     pub ua_platform: String,
     pub ua_platform_version: String,
+    /// Seed for JS-visible fingerprint surfaces. Stable for the lifetime of
+    /// this BrowserContext and shared by all pages/documents/frames in it.
+    pub fingerprint_seed: u32,
     pub proxy_url: Option<String>,
     pub robots_cache: Arc<RobotsCache>,
     pub obey_robots: bool,
@@ -112,6 +143,7 @@ impl BrowserContext {
         let platform = profile.platform.to_string();
         let ua_platform = profile.ua_platform.to_string();
         let ua_platform_version = profile.ua_platform_version.to_string();
+        let fingerprint_seed = next_fingerprint_seed();
         // Sync the http client's UA at construction so navigation requests pick it
         // up before any async setup runs. The lock has no other holders here, so
         // try_write always succeeds; we fall back silently if it ever fails.
@@ -127,6 +159,7 @@ impl BrowserContext {
             platform,
             ua_platform,
             ua_platform_version,
+            fingerprint_seed,
             proxy_url,
             robots_cache: Arc::new(RobotsCache::new()),
             obey_robots: false,
@@ -155,10 +188,22 @@ impl BrowserContext {
     }
 
     /// Create a context with the same browser configuration but independent
-    /// mutable network state. Persistent copies start with the template's
-    /// current cookies; incognito copies start empty and never write to the
-    /// template's storage directory.
+    /// mutable network state and a fresh context-scoped fingerprint seed.
+    /// Persistent copies start with the template's current cookies; incognito
+    /// copies start empty and never write to the template's storage directory.
     pub fn isolated_copy(&self, id: String, persistent: bool) -> Self {
+        self.isolated_copy_with_proxy(id, persistent, self.proxy_url.clone())
+    }
+
+    /// As isolated_copy, but use an explicit effective proxy. This is the
+    /// ownership boundary used by CDP Target.createBrowserContext so separate
+    /// browser contexts never share a proxy client or connection pool.
+    pub fn isolated_copy_with_proxy(
+        &self,
+        id: String,
+        persistent: bool,
+        proxy_url: Option<String>,
+    ) -> Self {
         let cookie_jar = Arc::new(CookieJar::new());
         if persistent {
             cookie_jar.copy_from(&self.cookie_jar);
@@ -166,7 +211,7 @@ impl BrowserContext {
 
         let mut client = ObscuraHttpClient::with_full_options(
             cookie_jar.clone(),
-            self.proxy_url.as_deref(),
+            proxy_url.as_deref(),
             self.allow_private_network,
         );
         if self.stealth {
@@ -184,7 +229,8 @@ impl BrowserContext {
             platform: self.platform.clone(),
             ua_platform: self.ua_platform.clone(),
             ua_platform_version: self.ua_platform_version.clone(),
-            proxy_url: self.proxy_url.clone(),
+            fingerprint_seed: next_fingerprint_seed(),
+            proxy_url,
             robots_cache: Arc::new(RobotsCache::new()),
             obey_robots: self.obey_robots,
             stealth: self.stealth,
@@ -270,5 +316,24 @@ mod tests {
 
         assert_eq!(source.cookie_jar.get_all_cookies().len(), 1);
         assert_eq!(source.http_client.user_agent.read().await.as_str(), "Template-UA/1.0");
+        assert_ne!(source.fingerprint_seed, persistent.fingerprint_seed);
+        assert_ne!(persistent.fingerprint_seed, incognito.fingerprint_seed);
+    }
+
+    #[test]
+    fn isolated_copy_can_override_proxy_without_changing_the_source() {
+        let source = BrowserContext::with_proxy(
+            "source".to_string(),
+            Some("http://proxy-a.example:8080".to_string()),
+        );
+        let copy = source.isolated_copy_with_proxy(
+            "copy".to_string(),
+            false,
+            Some("http://proxy-b.example:8080".to_string()),
+        );
+
+        assert_eq!(source.proxy_url.as_deref(), Some("http://proxy-a.example:8080"));
+        assert_eq!(copy.proxy_url.as_deref(), Some("http://proxy-b.example:8080"));
+        assert_eq!(copy.http_client.proxy_url(), Some("http://proxy-b.example:8080"));
     }
 }
