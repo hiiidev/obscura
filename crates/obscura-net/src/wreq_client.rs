@@ -189,6 +189,7 @@ pub struct StealthHttpClient {
     allow_private_network: bool,
     pub block_trackers: bool,
     pub cookie_jar: Arc<CookieJar>,
+    pub user_agent: RwLock<String>,
     pub extra_headers: RwLock<HashMap<String, String>>,
     pub in_flight: Arc<std::sync::atomic::AtomicU32>,
 }
@@ -211,6 +212,20 @@ impl StealthHttpClient {
         cookie_jar: Arc<CookieJar>,
         proxy_url: Option<&str>,
         allow_private_network: bool,
+    ) -> Self {
+        Self::with_proxy_and_user_agent(
+            cookie_jar,
+            proxy_url,
+            allow_private_network,
+            STEALTH_USER_AGENT,
+        )
+    }
+
+    pub fn with_proxy_and_user_agent(
+        cookie_jar: Arc<CookieJar>,
+        proxy_url: Option<&str>,
+        allow_private_network: bool,
+        user_agent: &str,
     ) -> Self {
         let emulation_opts = wreq_util::Emulation::builder()
             .profile(wreq_util::Profile::Chrome145)
@@ -284,9 +299,14 @@ impl StealthHttpClient {
                 std::env::var("OBSCURA_BLOCK_TRACKERS").ok().as_deref(),
             ),
             cookie_jar,
+            user_agent: RwLock::new(user_agent.to_string()),
             extra_headers: RwLock::new(HashMap::new()),
             in_flight: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
+    }
+
+    pub async fn set_user_agent(&self, user_agent: &str) {
+        *self.user_agent.write().await = user_agent.to_string();
     }
 
     pub async fn fetch(&self, url: &Url) -> Result<Response, ObscuraNetError> {
@@ -346,7 +366,9 @@ impl StealthHttpClient {
             validate_request_mode(&request, &current_url)?;
             let mut req = self.client.get(current_url.as_str());
 
+            let user_agent = self.user_agent.read().await.clone();
             req = req
+                .header("user-agent", user_agent)
                 .header("accept", request.accept())
                 .header("sec-fetch-site", request_fetch_site(&request, &current_url))
                 .header("sec-fetch-mode", request.mode.header_value())
@@ -541,7 +563,10 @@ impl StealthHttpClient {
         let req_method = method
             .parse::<wreq::Method>()
             .map_err(|e| ObscuraNetError::Network(format!("invalid method '{}': {}", method, e)))?;
-        let mut req = self.client.request(req_method, url.as_str());
+        let mut req = self
+            .client
+            .request(req_method, url.as_str())
+            .header("user-agent", self.user_agent.read().await.clone());
 
         if let Some(context) = cookie_context {
             let cookie_header = self.cookie_jar.get_cookie_header_in_context(url, context);
@@ -826,6 +851,7 @@ mod tests {
             allow_private_network: true,
             block_trackers: true,
             cookie_jar: Arc::new(CookieJar::new()),
+            user_agent: tokio::sync::RwLock::new(STEALTH_USER_AGENT.to_string()),
             extra_headers: tokio::sync::RwLock::new(std::collections::HashMap::new()),
             in_flight: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         };
