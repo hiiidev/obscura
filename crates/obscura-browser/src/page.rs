@@ -5167,6 +5167,74 @@ mod tests {
         page
     }
 
+    #[test]
+    fn web_storage_survives_document_runtime_replacement() {
+        let mut page = network_idle_test_page();
+        assert_eq!(
+            page.evaluate(r#"(() => {
+                localStorage.setItem('local-key', 'local-value');
+                sessionStorage.setItem('session-key', 'session-value');
+                return [localStorage.length, sessionStorage.length];
+            })()"#),
+            serde_json::json!([1, 1])
+        );
+
+        // A real full navigation snapshots immediately before replacing V8.
+        page.snapshot_web_storage();
+        page.js = None;
+        page.dom = Some(parse_html("<html><body>reloaded</body></html>"));
+        page.init_js();
+
+        assert_eq!(
+            page.evaluate("[localStorage.getItem('local-key'), sessionStorage.getItem('session-key')]"),
+            serde_json::json!(["local-value", "session-value"])
+        );
+    }
+
+    #[test]
+    fn indexeddb_later_transaction_reads_committed_write() {
+        let mut page = network_idle_test_page();
+        page.evaluate(r#"(() => {
+            globalThis.__idbRegression = null;
+            const request = indexedDB.open('regression-db', 1);
+            request.onupgradeneeded = () => request.result.createObjectStore('items');
+            request.onsuccess = () => {
+                const db = request.result;
+                const write = db.transaction('items', 'readwrite');
+                write.objectStore('items').put({value: 42}, 'answer');
+                write.oncomplete = () => {
+                    const read = db.transaction('items', 'readonly');
+                    const get = read.objectStore('items').get('answer');
+                    get.onsuccess = () => { globalThis.__idbRegression = get.result?.value ?? null; };
+                };
+            };
+            return true;
+        })()"#);
+        assert_eq!(page.evaluate("__idbRegression"), serde_json::json!(42));
+    }
+
+    #[cfg(feature = "render")]
+    #[test]
+    fn iframe_canvas_exposes_2d_context() {
+        let mut page = network_idle_test_page();
+        assert_eq!(
+            page.evaluate(r#"(() => {
+                const iframe = document.createElement('iframe');
+                document.body.appendChild(iframe);
+                const d = iframe.contentDocument;
+                const canvas = d.createElement('canvas');
+                canvas.width = 16;
+                canvas.height = 16;
+                d.body.appendChild(canvas);
+                const context = canvas.getContext('2d');
+                if (!context) return [false, null];
+                context.fillRect(0, 0, 4, 4);
+                return [true, typeof context.getImageData];
+            })()"#),
+            serde_json::json!([true, "function"])
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn network_idle_preserves_quiet_window_and_page_tasks() {
         let mut page = network_idle_test_page();
