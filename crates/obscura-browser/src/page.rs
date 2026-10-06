@@ -1087,10 +1087,12 @@ impl Page {
             // http://, which only works when the upstream happens to be a
             // Clash-style mixed-mode proxy and breaks plain SOCKS5 servers
             // like `ssh -ND` (#160).
-            Some(Arc::new(StealthHttpClient::with_proxy(
+            let proxy_url = context.effective_proxy_url();
+            Some(Arc::new(StealthHttpClient::with_proxy_and_user_agent(
                 context.cookie_jar.clone(),
-                context.proxy_url.as_deref(),
+                proxy_url.as_deref(),
                 context.allow_private_network,
+                &context.user_agent,
             )))
         } else {
             None
@@ -1144,6 +1146,34 @@ impl Page {
             callbacks: Arc::new(CallbackRegistry::new()),
             #[cfg(feature = "stealth")]
             stealth_client,
+        }
+    }
+
+    /// Rebuild the stealth transport after proxy credentials become available.
+    /// The ordinary HTTP client is lazy and reads credentials before its first
+    /// request; wreq is eager, so it must be recreated at the same ownership
+    /// boundary.
+    #[cfg(feature = "stealth")]
+    pub fn refresh_stealth_transport(&mut self) {
+        if !self.context.stealth {
+            self.stealth_client = None;
+            return;
+        }
+        let proxy_url = self.context.effective_proxy_url();
+        self.stealth_client = Some(Arc::new(StealthHttpClient::with_proxy_and_user_agent(
+            self.context.cookie_jar.clone(),
+            proxy_url.as_deref(),
+            self.context.allow_private_network,
+            &self.context.user_agent,
+        )));
+    }
+
+    /// Keep ordinary and stealth network paths on the same User-Agent.
+    pub async fn set_user_agent_override(&self, user_agent: &str) {
+        self.http_client.set_user_agent(user_agent).await;
+        #[cfg(feature = "stealth")]
+        if let Some(client) = self.stealth_client.as_ref() {
+            client.set_user_agent(user_agent).await;
         }
     }
 
@@ -1862,7 +1892,7 @@ impl Page {
         // equivalent to with_base_url() (direct connection).
         let mut rt = ObscuraJsRuntime::with_base_url_and_proxy(
             &self.url_string(),
-            self.context.proxy_url.clone(),
+            self.context.effective_proxy_url(),
         );
         rt.set_url(&self.url_string());
         rt.set_encoding(&self.encoding);
@@ -1874,33 +1904,15 @@ impl Page {
         #[cfg(feature = "stealth")]
         if self.stealth_client.is_some() {
             rt.set_stealth(true);
-            rt.set_user_agent(obscura_net::STEALTH_USER_AGENT);
-            rt.set_platform(
-                obscura_net::STEALTH_NAVIGATOR_PLATFORM,
-                obscura_net::STEALTH_UA_PLATFORM,
-                obscura_net::STEALTH_UA_PLATFORM_VERSION,
-            );
-        } else {
-            if let Ok(ua) = self.http_client.user_agent.try_read() {
-                rt.set_user_agent(&ua);
-            }
-            rt.set_platform(
-                &self.context.platform,
-                &self.context.ua_platform,
-                &self.context.ua_platform_version,
-            );
         }
-        #[cfg(not(feature = "stealth"))]
-        {
-            if let Ok(ua) = self.http_client.user_agent.try_read() {
-                rt.set_user_agent(&ua);
-            }
-            rt.set_platform(
-                &self.context.platform,
-                &self.context.ua_platform,
-                &self.context.ua_platform_version,
-            );
+        if let Ok(ua) = self.http_client.user_agent.try_read() {
+            rt.set_user_agent(&ua);
         }
+        rt.set_platform(
+            &self.context.platform,
+            &self.context.ua_platform,
+            &self.context.ua_platform_version,
+        );
         rt.set_fingerprint_seed(self.context.fingerprint_seed);
         if let Some(locale) = &self.locale_override {
             rt.set_locale(locale);
