@@ -379,6 +379,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn browser_context_rejects_malformed_proxy_instead_of_falling_back_direct() {
+        let mut ctx = CdpContext::new();
+        let error = handle(
+            "createBrowserContext",
+            &json!({"proxyServer": "not-a-valid-proxy"}),
+            &mut ctx,
+            &None,
+        )
+        .await
+        .expect_err("malformed proxyServer must reject context creation");
+
+        assert!(error.contains("Invalid proxyServer"), "{error}");
+        assert!(ctx.browser_contexts.is_empty());
+    }
+
+    #[tokio::test]
     async fn browser_context_can_override_proxy_and_gets_its_own_fingerprint_seed() {
         let mut ctx = CdpContext::new();
         let created = handle(
