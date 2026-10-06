@@ -143,10 +143,37 @@ impl BrowserContext {
             client.block_trackers = true;
         }
         let profile = crate::profiles::select_profile();
+        #[cfg(feature = "stealth")]
+        let resolved_ua = user_agent.unwrap_or_else(|| {
+            if stealth {
+                obscura_net::STEALTH_USER_AGENT.to_string()
+            } else {
+                profile.user_agent.to_string()
+            }
+        });
+        #[cfg(not(feature = "stealth"))]
         let resolved_ua = user_agent.unwrap_or_else(|| profile.user_agent.to_string());
-        let platform = profile.platform.to_string();
-        let ua_platform = profile.ua_platform.to_string();
-        let ua_platform_version = profile.ua_platform_version.to_string();
+
+        #[cfg(feature = "stealth")]
+        let (platform, ua_platform, ua_platform_version) = if stealth {
+            (
+                obscura_net::STEALTH_NAVIGATOR_PLATFORM.to_string(),
+                obscura_net::STEALTH_UA_PLATFORM.to_string(),
+                obscura_net::STEALTH_UA_PLATFORM_VERSION.to_string(),
+            )
+        } else {
+            (
+                profile.platform.to_string(),
+                profile.ua_platform.to_string(),
+                profile.ua_platform_version.to_string(),
+            )
+        };
+        #[cfg(not(feature = "stealth"))]
+        let (platform, ua_platform, ua_platform_version) = (
+            profile.platform.to_string(),
+            profile.ua_platform.to_string(),
+            profile.ua_platform_version.to_string(),
+        );
         let fingerprint_seed = next_fingerprint_seed();
         // Sync the http client's UA at construction so navigation requests pick it
         // up before any async setup runs. The lock has no other holders here, so
@@ -190,6 +217,22 @@ impl BrowserContext {
 
     pub fn with_proxy(id: String, proxy_url: Option<String>) -> Self {
         Self::with_options(id, proxy_url, false)
+    }
+
+    pub fn effective_proxy_url(&self) -> Option<String> {
+        self.http_client.effective_proxy_url()
+    }
+
+    pub fn has_proxy_credentials(&self) -> bool {
+        self.http_client.has_proxy_credentials()
+    }
+
+    pub fn set_proxy_credentials(
+        &self,
+        username: String,
+        password: String,
+    ) -> Result<(), obscura_net::ObscuraNetError> {
+        self.http_client.set_proxy_credentials(username, password)
     }
 
     /// Create a context with the same browser configuration but independent
