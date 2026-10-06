@@ -98,7 +98,8 @@ pub async fn handle(
                 None
             };
 
-            ctx.fetch_intercept.enabled = true;
+            let pause_requests = !patterns.is_empty();
+            ctx.fetch_intercept.enabled = pause_requests;
             ctx.fetch_intercept.patterns = patterns.clone();
             let tx_clone = ctx.intercept_tx.clone();
             if let Some(page) = ctx.get_session_page_mut(session_id) {
@@ -106,7 +107,7 @@ pub async fn handle(
                 if let Some(tx) = tx_clone {
                     page.set_intercept_tx(tx);
                 }
-                page.enable_intercept(true);
+                page.enable_intercept(pause_requests);
             }
 
             if let Some((page_id, frame_id, proxy)) = proxy_auth_target {
@@ -390,6 +391,10 @@ mod tests {
             .expect("proxy context should emit an auth challenge");
         assert_eq!(event.params["authChallenge"]["source"], "Proxy");
         assert_eq!(event.session_id, session_id);
+        assert!(
+            !ctx.fetch_intercept.enabled,
+            "auth-only Fetch.enable with empty patterns must not pause ordinary requests"
+        );
         let request_id = event.params["requestId"].as_str().unwrap().to_string();
 
         handle(
