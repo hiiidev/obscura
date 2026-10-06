@@ -267,7 +267,13 @@ pub async fn handle(
             Ok(json!({ "browserContextIds": ids }))
         }
         "createBrowserContext" => {
-            let id = ctx.create_browser_context();
+            let proxy_server = params
+                .get("proxyServer")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
+            let id = ctx.create_browser_context_with_proxy(proxy_server);
             Ok(json!({ "browserContextId": id }))
         }
         "disposeBrowserContext" => {
@@ -366,6 +372,30 @@ mod tests {
             .await
             .expect("context listing should succeed");
         assert_eq!(listed["browserContextIds"], json!([context_id]));
+    }
+
+    #[tokio::test]
+    async fn browser_context_can_override_proxy_and_gets_its_own_fingerprint_seed() {
+        let mut ctx = CdpContext::new();
+        let created = handle(
+            "createBrowserContext",
+            &json!({"proxyServer": "http://proxy-b.example:8080"}),
+            &mut ctx,
+            &None,
+        )
+        .await
+        .expect("context creation should succeed");
+
+        let context_id = created["browserContextId"].as_str().unwrap();
+        let isolated = ctx.browser_context(context_id).unwrap();
+        assert_eq!(
+            isolated.proxy_url.as_deref(),
+            Some("http://proxy-b.example:8080")
+        );
+        assert_ne!(
+            isolated.fingerprint_seed,
+            ctx.default_context.fingerprint_seed
+        );
     }
 
     #[tokio::test]
