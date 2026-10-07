@@ -73,6 +73,50 @@ pub const STEALTH_UA_PLATFORM: &str = "Windows";
 pub const STEALTH_UA_PLATFORM_VERSION: &str = "15.0.0";
 
 #[cfg(feature = "stealth")]
+fn chrome_profile_from_user_agent(user_agent: &str) -> Option<wreq_util::Profile> {
+    let major = user_agent
+        .split("Chrome/")
+        .nth(1)?
+        .split('.')
+        .next()?
+        .parse::<u16>()
+        .ok()?;
+    Some(match major {
+        142 => wreq_util::Profile::Chrome142,
+        143 => wreq_util::Profile::Chrome143,
+        144 => wreq_util::Profile::Chrome144,
+        145 => wreq_util::Profile::Chrome145,
+        146 => wreq_util::Profile::Chrome146,
+        147 => wreq_util::Profile::Chrome147,
+        148 => wreq_util::Profile::Chrome148,
+        _ => return None,
+    })
+}
+
+#[cfg(feature = "stealth")]
+fn platform_from_user_agent(user_agent: &str) -> Option<wreq_util::Platform> {
+    if user_agent.contains("(Windows NT 10.0; Win64; x64)") {
+        Some(wreq_util::Platform::Windows)
+    } else if user_agent.contains("(Macintosh; Intel Mac OS X 10_15_7)") {
+        Some(wreq_util::Platform::MacOS)
+    } else if user_agent.contains("(X11; Linux x86_64)") {
+        Some(wreq_util::Platform::Linux)
+    } else {
+        None
+    }
+}
+
+#[cfg(feature = "stealth")]
+fn transport_identity_from_user_agent(
+    user_agent: &str,
+) -> Option<(wreq_util::Profile, wreq_util::Platform)> {
+    Some((
+        chrome_profile_from_user_agent(user_agent)?,
+        platform_from_user_agent(user_agent)?,
+    ))
+}
+
+#[cfg(feature = "stealth")]
 fn tracker_blocking_enabled(value: Option<&str>) -> bool {
     !matches!(
         value.map(str::trim),
@@ -227,9 +271,22 @@ impl StealthHttpClient {
         allow_private_network: bool,
         user_agent: &str,
     ) -> Self {
+        // The UA is not an independent knob in stealth mode. It selects the
+        // matching Chrome TLS/HTTP profile and OS-specific header preset as one
+        // atomic identity. Unsupported UAs fall back to the canonical identity
+        // rather than creating a cross-layer mismatch.
+        let (transport_profile, transport_platform, effective_user_agent) =
+            match transport_identity_from_user_agent(user_agent) {
+                Some((profile, platform)) => (profile, platform, user_agent),
+                None => (
+                    wreq_util::Profile::Chrome145,
+                    wreq_util::Platform::Windows,
+                    STEALTH_USER_AGENT,
+                ),
+            };
         let emulation_opts = wreq_util::Emulation::builder()
-            .profile(wreq_util::Profile::Chrome145)
-            .platform(wreq_util::Platform::Windows)
+            .profile(transport_profile)
+            .platform(transport_platform)
             .build();
 
         let mut builder = wreq::Client::builder()
@@ -299,7 +356,7 @@ impl StealthHttpClient {
                 std::env::var("OBSCURA_BLOCK_TRACKERS").ok().as_deref(),
             ),
             cookie_jar,
-            user_agent: RwLock::new(user_agent.to_string()),
+            user_agent: RwLock::new(effective_user_agent.to_string()),
             extra_headers: RwLock::new(HashMap::new()),
             in_flight: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
@@ -643,6 +700,40 @@ mod tests {
     use crate::cookies::CookieJar;
     use crate::STEALTH_USER_AGENT;
     use wreq::dns::{Name, Resolve};
+
+    #[test]
+    fn supported_stealth_uas_map_to_matching_transport_profiles() {
+        for major in 142..=148 {
+            let windows = format!(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
+            );
+            let macos = format!(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
+            );
+            let linux = format!(
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
+            );
+            for (ua, expected_platform) in [
+                (windows.as_str(), wreq_util::Platform::Windows),
+                (macos.as_str(), wreq_util::Platform::MacOS),
+                (linux.as_str(), wreq_util::Platform::Linux),
+            ] {
+                let (_, platform) = super::transport_identity_from_user_agent(ua)
+                    .expect("supported stealth identity must map to wreq");
+                assert_eq!(platform, expected_platform);
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_stealth_ua_has_no_transport_identity() {
+        assert!(super::transport_identity_from_user_agent(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/999.0.0.0"
+        ).is_none());
+        assert!(super::transport_identity_from_user_agent(
+            "Mozilla/5.0 (iPhone) CriOS/148.0.0.0"
+        ).is_none());
+    }
 
     // Mirrors client::ssrf_tests::resolver_blocks_hostname_that_resolves_to_loopback.
     // Both transports must agree: a host-string check alone cannot see that a
