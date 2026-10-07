@@ -56,7 +56,8 @@ const __obscuraCore = globalThis.Deno.core;
     '_commonFonts', '_isXMLDocument', '_isValidPITarget', '_isHTMLEl',
     '_nodeList', '_rngNodeLength', '_rngNodeIndex', '_rngSame', '_rngRoot',
     '_rngAncestors', '_rngOrder', '_rngCmp', '_rngCheckOffset',
-    '_idbRequest', '_idbObjectStore', '_idbTransaction', '_idbDatabase',
+    '_idbRequest', '_idbNameList', '_idbObjectStore', '_idbTransaction', '_idbDatabase',
+    '_idbExportState', '_idbImportState', '__obscura_idb_export', '__obscura_idb_import',
     '_makeListenerBox',
     // WebIDL interfaces. A real browser exposes these on the global as
     // enumerable:false; here they were assigned with `globalThis.X = X`, which
@@ -14618,7 +14619,7 @@ class _Canvas2D {
         this._buf.byteOffset,
         this._buf.byteLength,
       );
-      if (!register(this.canvas._nid, this._w, this._h, bytes)) {
+      if (!register(this.canvas._nid, this._w, this._h, bytes, _realmFrameId)) {
         throw new RangeError('Canvas backing store allocation failed');
       }
     }
@@ -14629,7 +14630,7 @@ class _Canvas2D {
     queueMicrotask(() => {
       this._damageQueued = false;
       const damage = __obscuraCore.ops.op_canvas_paint_damage;
-      if (typeof damage === 'function') damage(this.canvas._nid);
+      if (typeof damage === 'function') damage(this.canvas._nid, _realmFrameId);
     });
   }
   _parseColor(css) {
@@ -15209,11 +15210,12 @@ globalThis.RTCPeerConnection = class RTCPeerConnection {
 globalThis.RTCSessionDescription = class RTCSessionDescription { constructor(d){this.type=d?.type;this.sdp=d?.sdp;} };
 globalThis.RTCIceCandidate = class RTCIceCandidate { constructor(d){this.candidate=d?.candidate||'';} };
 
-// Minimal but spec-shape-correct IndexedDB shim. We don't persist anything,
-// but authentication libraries (Firebase, Supabase, dexie) hang forever on
-// the first `get` because their request's `onsuccess` is never called. Fire
-// `onsuccess` asynchronously with `null` so reads complete-but-empty, which
-// most libraries treat as a cache miss and fall back to the network.
+// Small in-memory IndexedDB implementation. Database/object-store state is
+// shared by every transaction in the current document, so a committed write is
+// visible to a later transaction instead of every transaction receiving a new
+// empty Map. BrowserContext navigation persistence is handled by the host.
+const _idbDatabases = new Map();
+
 function _idbRequest(produceResult) {
   const req = {
     result: undefined,
@@ -15223,6 +15225,7 @@ function _idbRequest(produceResult) {
     readyState: 'pending',
     onsuccess: null,
     onerror: null,
+    onupgradeneeded: null,
     addEventListener(type, fn) { req['on' + type] = fn; },
     removeEventListener(type, fn) { if (req['on' + type] === fn) req['on' + type] = null; },
   };
@@ -15243,18 +15246,36 @@ function _idbRequest(produceResult) {
   return req;
 }
 
-function _idbObjectStore(name) {
-  const data = new Map();
+function _idbNameList(names) {
+  const list = Array.from(names);
+  return {
+    contains(name) { return list.includes(String(name)); },
+    item(index) { return index >= 0 && index < list.length ? list[index] : null; },
+    get length() { return list.length; },
+    [Symbol.iterator]() { return list[Symbol.iterator](); },
+  };
+}
+
+function _idbObjectStore(name, data, tx) {
   return {
     name,
     keyPath: null,
     autoIncrement: false,
-    indexNames: { contains() { return false; }, length: 0, item() { return null; } },
-    transaction: null,
-    add(value, key) { const k = key ?? Date.now(); data.set(k, value); return _idbRequest(() => k); },
-    put(value, key) { const k = key ?? Date.now(); data.set(k, value); return _idbRequest(() => k); },
-    get(key) { return _idbRequest(() => data.get(key) ?? undefined); },
-    getAll() { return _idbRequest(() => Array.from(data.values())); },
+    indexNames: _idbNameList([]),
+    transaction: tx || null,
+    add(value, key) {
+      const k = key ?? Date.now();
+      if (data.has(k)) return _idbRequest(() => { throw new DOMException('Key already exists', 'ConstraintError'); });
+      data.set(k, structuredClone(value));
+      return _idbRequest(() => k);
+    },
+    put(value, key) {
+      const k = key ?? Date.now();
+      data.set(k, structuredClone(value));
+      return _idbRequest(() => k);
+    },
+    get(key) { return _idbRequest(() => data.has(key) ? structuredClone(data.get(key)) : undefined); },
+    getAll() { return _idbRequest(() => Array.from(data.values(), value => structuredClone(value))); },
     getAllKeys() { return _idbRequest(() => Array.from(data.keys())); },
     getKey(key) { return _idbRequest(() => (data.has(key) ? key : undefined)); },
     delete(key) { return _idbRequest(() => { data.delete(key); return undefined; }); },
@@ -15268,61 +15289,155 @@ function _idbObjectStore(name) {
   };
 }
 
-function _idbTransaction(storeNames) {
-  const stores = new Map();
-  const names = Array.isArray(storeNames) ? storeNames : [storeNames];
-  for (const n of names) stores.set(String(n), _idbObjectStore(String(n)));
+function _idbTransaction(db, storeNames, mode) {
+  const names = Array.isArray(storeNames) ? storeNames.map(String) : [String(storeNames)];
   const tx = {
-    db: null,
-    mode: 'readonly',
-    objectStoreNames: { contains: (n) => stores.has(String(n)), length: stores.size },
+    db,
+    mode: mode || 'readonly',
+    objectStoreNames: _idbNameList(names),
     onabort: null, oncomplete: null, onerror: null,
     error: null,
     objectStore(name) {
-      let s = stores.get(name);
-      if (!s) { s = _idbObjectStore(name); stores.set(name, s); }
-      s.transaction = tx;
-      return s;
+      name = String(name);
+      let data = db._state.stores.get(name);
+      if (!data) {
+        data = new Map();
+        db._state.stores.set(name, data);
+      }
+      return _idbObjectStore(name, data, tx);
     },
-    abort() {},
+    abort() {
+      if (typeof tx.onabort === 'function') {
+        try { tx.onabort({ target: tx, type: 'abort' }); } catch (e) {}
+      }
+    },
     commit() {},
     addEventListener(type, fn) { tx['on' + type] = fn; },
     removeEventListener(type, fn) { if (tx['on' + type] === fn) tx['on' + type] = null; },
   };
-  Promise.resolve().then(() => {
+  // Give requests queued synchronously after transaction() one microtask turn
+  // before completing the transaction.
+  Promise.resolve().then(() => Promise.resolve().then(() => {
     if (typeof tx.oncomplete === 'function') {
       try { tx.oncomplete({ target: tx, type: 'complete' }); } catch (e) {}
     }
-  });
+  }));
   return tx;
 }
 
 function _idbDatabase(name, version) {
-  return {
+  let state = _idbDatabases.get(name);
+  if (!state) {
+    state = { version: version || 1, stores: new Map() };
+    _idbDatabases.set(name, state);
+  } else if (version && version > state.version) {
+    state.version = version;
+  }
+  const db = {
     name,
-    version,
-    objectStoreNames: { contains() { return false; }, length: 0, item() { return null; } },
-    createObjectStore(n) { return _idbObjectStore(n); },
-    deleteObjectStore() {},
-    transaction(storeNames, mode) {
-      const tx = _idbTransaction(storeNames);
-      tx.mode = mode || 'readonly';
-      return tx;
+    get version() { return state.version; },
+    get objectStoreNames() { return _idbNameList(state.stores.keys()); },
+    _state: state,
+    createObjectStore(n) {
+      n = String(n);
+      if (!state.stores.has(n)) state.stores.set(n, new Map());
+      return _idbObjectStore(n, state.stores.get(n), null);
     },
+    deleteObjectStore(n) { state.stores.delete(String(n)); },
+    transaction(storeNames, mode) { return _idbTransaction(db, storeNames, mode); },
     close() {},
     onversionchange: null, onabort: null, onerror: null, onclose: null,
     addEventListener() {}, removeEventListener() {},
   };
+  return db;
 }
 
 globalThis.indexedDB = {
   open(name, version) {
-    return _idbRequest(() => _idbDatabase(name, version || 1));
+    name = String(name);
+    const isNew = !_idbDatabases.has(name);
+    const oldVersion = _idbDatabases.get(name)?.version || 0;
+    const req = {
+      result: undefined, error: null, source: null, transaction: null,
+      readyState: 'pending', onsuccess: null, onerror: null, onupgradeneeded: null,
+      addEventListener(type, fn) { req['on' + type] = fn; },
+      removeEventListener(type, fn) { if (req['on' + type] === fn) req['on' + type] = null; },
+    };
+    Promise.resolve().then(() => {
+      try {
+        const db = _idbDatabase(name, version || 1);
+        req.result = db;
+        if (isNew || (version && version > oldVersion)) {
+          if (typeof req.onupgradeneeded === 'function') {
+            try { req.onupgradeneeded({ target: req, type: 'upgradeneeded', oldVersion, newVersion: db.version }); } catch (e) {}
+          }
+        }
+        req.readyState = 'done';
+        if (typeof req.onsuccess === 'function') {
+          try { req.onsuccess({ target: req, type: 'success' }); } catch (e) {}
+        }
+      } catch (e) {
+        req.error = e; req.readyState = 'done';
+        if (typeof req.onerror === 'function') {
+          try { req.onerror({ target: req, type: 'error' }); } catch (e2) {}
+        }
+      }
+    });
+    return req;
   },
-  deleteDatabase(_name) { return _idbRequest(() => undefined); },
-  databases() { return Promise.resolve([]); },
+  deleteDatabase(name) { return _idbRequest(() => { _idbDatabases.delete(String(name)); return undefined; }); },
+  databases() { return Promise.resolve(Array.from(_idbDatabases, ([name, state]) => ({ name, version: state.version }))); },
   cmp(a, b) { return a < b ? -1 : a > b ? 1 : 0; },
 };
+function _idbExportState() {
+  const databases = [];
+  for (const [name, state] of _idbDatabases) {
+    const stores = [];
+    for (const [storeName, data] of state.stores) {
+      const entries = [];
+      for (const [key, value] of data) {
+        try {
+          const encoded = JSON.stringify([key, value]);
+          if (encoded !== undefined) entries.push(JSON.parse(encoded));
+        } catch (e) {
+          // The lightweight shim cannot faithfully persist values such as
+          // BigInt or cyclic graphs yet. Keep the rest of the database rather
+          // than dropping every serializable entry.
+        }
+      }
+      stores.push([storeName, entries]);
+    }
+    databases.push({ name, version: state.version, stores });
+  }
+  return JSON.stringify(databases);
+}
+
+function _idbImportState(serialized) {
+  let databases;
+  try { databases = JSON.parse(String(serialized || '[]')); }
+  catch (e) { return false; }
+  if (!Array.isArray(databases)) return false;
+  _idbDatabases.clear();
+  for (const database of databases) {
+    if (!database || typeof database.name !== 'string') continue;
+    const stores = new Map();
+    for (const store of Array.isArray(database.stores) ? database.stores : []) {
+      if (!Array.isArray(store) || store.length < 2) continue;
+      const storeName = String(store[0]);
+      const entries = Array.isArray(store[1]) ? store[1] : [];
+      stores.set(storeName, new Map(entries.filter(entry => Array.isArray(entry) && entry.length >= 2)));
+    }
+    _idbDatabases.set(database.name, {
+      version: Number(database.version) || 1,
+      stores,
+    });
+  }
+  return true;
+}
+
+globalThis.__obscura_idb_export = _idbExportState;
+globalThis.__obscura_idb_import = _idbImportState;
+
 globalThis.IDBKeyRange = {
   only(v) { return { lower: v, upper: v, lowerOpen: false, upperOpen: false, includes(x) { return x === v; } }; },
   lowerBound(v, open) { return { lower: v, upper: null, lowerOpen: !!open, upperOpen: false, includes(x) { return open ? x > v : x >= v; } }; },

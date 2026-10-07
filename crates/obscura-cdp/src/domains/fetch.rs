@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use serde_json::{json, Value};
 
 use crate::dispatch::CdpContext;
+use crate::types::CdpEvent;
 
 pub struct PausedRequest {
     pub request_id: String,
@@ -34,6 +35,10 @@ pub struct FetchInterceptState {
     pub enabled: bool,
     pub patterns: Vec<String>,
     pub paused: HashMap<String, PausedRequest>,
+    /// Synthetic proxy-auth challenges issued before the first request so
+    /// Playwright's standard Fetch.authRequired/continueWithAuth flow can
+    /// supply BrowserContext proxy credentials.
+    pub proxy_auth_requests: HashMap<String, String>,
     request_counter: u64,
 }
 
@@ -43,6 +48,7 @@ impl FetchInterceptState {
             enabled: false,
             patterns: Vec::new(),
             paused: HashMap::new(),
+            proxy_auth_requests: HashMap::new(),
             request_counter: 0,
         }
     }
@@ -74,8 +80,26 @@ pub async fn handle(
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_else(|| vec!["*".to_string()]);
+            let handle_auth_requests = params
+                .get("handleAuthRequests")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
 
-            ctx.fetch_intercept.enabled = true;
+            // Snapshot auth routing before mutably borrowing interception state.
+            let proxy_auth_target = if handle_auth_requests {
+                ctx.get_session_page(session_id).and_then(|page| {
+                    let proxy = page.context.proxy_url.clone()?;
+                    if page.context.has_proxy_credentials() {
+                        return None;
+                    }
+                    Some((page.id.clone(), page.frame_id.clone(), proxy))
+                })
+            } else {
+                None
+            };
+
+            let pause_requests = !patterns.is_empty();
+            ctx.fetch_intercept.enabled = pause_requests;
             ctx.fetch_intercept.patterns = patterns.clone();
             let tx_clone = ctx.intercept_tx.clone();
             if let Some(page) = ctx.get_session_page_mut(session_id) {
@@ -83,7 +107,47 @@ pub async fn handle(
                 if let Some(tx) = tx_clone {
                     page.set_intercept_tx(tx);
                 }
-                page.enable_intercept(true);
+                page.enable_intercept(pause_requests);
+            }
+
+            if let Some((page_id, frame_id, proxy)) = proxy_auth_target {
+                let request_id = ctx.fetch_intercept.next_request_id();
+                ctx.fetch_intercept
+                    .proxy_auth_requests
+                    .insert(request_id.clone(), page_id);
+
+                let mut parsed = url::Url::parse(&proxy)
+                    .map_err(|error| format!("Invalid configured proxy URL: {error}"))?;
+                let _ = parsed.set_username("");
+                let _ = parsed.set_password(None);
+                parsed.set_path("/");
+                parsed.set_query(None);
+                parsed.set_fragment(None);
+                let origin = parsed.origin().ascii_serialization();
+                let request_url = parsed.to_string();
+
+                ctx.pending_events.push(CdpEvent {
+                    method: "Fetch.authRequired".to_string(),
+                    params: json!({
+                        "requestId": request_id,
+                        "request": {
+                            "url": request_url,
+                            "method": "GET",
+                            "headers": {},
+                            "initialPriority": "High",
+                            "referrerPolicy": "no-referrer",
+                        },
+                        "frameId": frame_id,
+                        "resourceType": "Document",
+                        "authChallenge": {
+                            "source": "Proxy",
+                            "origin": origin,
+                            "scheme": "Basic",
+                            "realm": "proxy",
+                        },
+                    }),
+                    session_id: session_id.clone(),
+                });
             }
 
             tracing::info!("Fetch interception enabled");
@@ -92,6 +156,7 @@ pub async fn handle(
         "disable" => {
             ctx.fetch_intercept.enabled = false;
             ctx.fetch_intercept.patterns.clear();
+            ctx.fetch_intercept.proxy_auth_requests.clear();
             if let Some(page) = ctx.get_session_page_mut(session_id) {
                 page.intercept_block_patterns.clear();
                 page.enable_intercept(false);
@@ -104,6 +169,56 @@ pub async fn handle(
                     headers: None,
                     post_data: None,
                 });
+            }
+            Ok(json!({}))
+        }
+        "continueWithAuth" => {
+            let request_id = params
+                .get("requestId")
+                .and_then(Value::as_str)
+                .ok_or("requestId required")?;
+            let page_id = ctx
+                .fetch_intercept
+                .proxy_auth_requests
+                .remove(request_id);
+
+            if let Some(page_id) = page_id {
+                let response = params
+                    .get("authChallengeResponse")
+                    .and_then(|value| value.get("response"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("Default");
+                if response == "ProvideCredentials" {
+                    let username = params
+                        .get("authChallengeResponse")
+                        .and_then(|value| value.get("username"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let password = params
+                        .get("authChallengeResponse")
+                        .and_then(|value| value.get("password"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+
+                    let context = ctx
+                        .pages
+                        .iter()
+                        .find(|page| page.id == page_id)
+                        .map(|page| page.context.clone())
+                        .ok_or("Proxy auth target page no longer exists")?;
+                    context
+                        .set_proxy_credentials(username, password)
+                        .map_err(|error| error.to_string())?;
+
+                    #[cfg(feature = "stealth")]
+                    for page in &mut ctx.pages {
+                        if std::sync::Arc::ptr_eq(&page.context, &context) {
+                            page.refresh_stealth_transport();
+                        }
+                    }
+                }
             }
             Ok(json!({}))
         }
@@ -246,6 +361,62 @@ mod tests {
             },
         );
         rx
+    }
+
+    #[tokio::test]
+    async fn proxy_auth_challenge_accepts_playwright_credentials() {
+        let context = std::sync::Arc::new(obscura_browser::BrowserContext::with_proxy(
+            "proxy-auth".to_string(),
+            Some("http://proxy.example:8080".to_string()),
+        ));
+        let mut ctx = CdpContext::new_with_shared_context(context.clone());
+        let page_id = ctx.create_page();
+        let session_id = Some("proxy-session".to_string());
+        ctx.sessions
+            .insert(session_id.clone().unwrap(), page_id.clone());
+
+        handle(
+            "enable",
+            &json!({"patterns": [], "handleAuthRequests": true}),
+            &mut ctx,
+            &session_id,
+        )
+        .await
+        .expect("Fetch.enable should succeed");
+
+        let event = ctx
+            .pending_events
+            .iter()
+            .find(|event| event.method == "Fetch.authRequired")
+            .expect("proxy context should emit an auth challenge");
+        assert_eq!(event.params["authChallenge"]["source"], "Proxy");
+        assert_eq!(event.session_id, session_id);
+        assert!(
+            !ctx.fetch_intercept.enabled,
+            "auth-only Fetch.enable with empty patterns must not pause ordinary requests"
+        );
+        let request_id = event.params["requestId"].as_str().unwrap().to_string();
+
+        handle(
+            "continueWithAuth",
+            &json!({
+                "requestId": request_id,
+                "authChallengeResponse": {
+                    "response": "ProvideCredentials",
+                    "username": "alice",
+                    "password": "secret",
+                }
+            }),
+            &mut ctx,
+            &Some("proxy-session".to_string()),
+        )
+        .await
+        .expect("Fetch.continueWithAuth should install proxy credentials");
+
+        let effective = context.effective_proxy_url().expect("proxy URL");
+        let parsed = url::Url::parse(&effective).unwrap();
+        assert_eq!(parsed.username(), "alice");
+        assert_eq!(parsed.password(), Some("secret"));
     }
 
     // Parity with server.rs handle_fetch_resolution: continueRequest must

@@ -273,6 +273,10 @@ pub async fn handle(
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(ToOwned::to_owned);
+            if let Some(proxy) = proxy_server.as_deref() {
+                obscura_net::validate_proxy_url(proxy)
+                    .map_err(|error| format!("Invalid proxyServer: {error}"))?;
+            }
             let id = ctx.create_browser_context_with_proxy(proxy_server);
             Ok(json!({ "browserContextId": id }))
         }
@@ -372,6 +376,22 @@ mod tests {
             .await
             .expect("context listing should succeed");
         assert_eq!(listed["browserContextIds"], json!([context_id]));
+    }
+
+    #[tokio::test]
+    async fn browser_context_rejects_malformed_proxy_instead_of_falling_back_direct() {
+        let mut ctx = CdpContext::new();
+        let error = handle(
+            "createBrowserContext",
+            &json!({"proxyServer": "not-a-valid-proxy"}),
+            &mut ctx,
+            &None,
+        )
+        .await
+        .expect_err("malformed proxyServer must reject context creation");
+
+        assert!(error.contains("Invalid proxyServer"), "{error}");
+        assert!(ctx.browser_contexts.is_empty());
     }
 
     #[tokio::test]

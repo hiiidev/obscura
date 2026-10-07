@@ -15,6 +15,31 @@ use url::Url;
 use crate::cookies::{same_site, CookieJar, SameSiteContext};
 use crate::interceptor::{InterceptAction, RequestInterceptor};
 
+
+/// Reject malformed proxy configuration instead of silently falling back to a
+/// direct connection. A proxy must be an absolute URL with a supported scheme
+/// and a host; the transport parser gets the final say as well.
+pub fn validate_proxy_url(proxy: &str) -> Result<(), ObscuraNetError> {
+    let proxy = proxy.trim();
+    if proxy.is_empty() {
+        return Err(ObscuraNetError::Network("proxy URL is empty".to_string()));
+    }
+    let parsed = Url::parse(proxy)
+        .map_err(|error| ObscuraNetError::Network(format!("invalid proxy URL: {error}")))?;
+    if !matches!(parsed.scheme(), "http" | "https" | "socks5" | "socks5h") {
+        return Err(ObscuraNetError::Network(format!(
+            "unsupported proxy scheme '{}'",
+            parsed.scheme()
+        )));
+    }
+    if parsed.host_str().is_none() {
+        return Err(ObscuraNetError::Network("proxy URL has no host".to_string()));
+    }
+    reqwest::Proxy::all(proxy)
+        .map_err(|error| ObscuraNetError::Network(format!("invalid proxy URL: {error}")))?;
+    Ok(())
+}
+
 fn configured_root_paths() -> Vec<std::path::PathBuf> {
     let mut paths = Vec::new();
     if let Some(path) = std::env::var_os("SSL_CERT_FILE").filter(|path| !path.is_empty()) {
@@ -837,6 +862,7 @@ async fn read_reqwest_body_limited(
 pub struct ObscuraHttpClient {
     client: tokio::sync::OnceCell<Client>,
     proxy_url: Option<String>,
+    proxy_credentials: std::sync::RwLock<Option<(String, String)>>,
     pub cookie_jar: Arc<CookieJar>,
     pub user_agent: RwLock<String>,
     pub accept_language: RwLock<String>,
@@ -1049,6 +1075,7 @@ impl ObscuraHttpClient {
         ObscuraHttpClient {
             client: tokio::sync::OnceCell::new(),
             proxy_url: proxy_url.map(|s| s.to_string()),
+            proxy_credentials: std::sync::RwLock::new(None),
             cookie_jar,
             user_agent: RwLock::new(
                 "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36".to_string(),
@@ -1085,7 +1112,7 @@ impl ObscuraHttpClient {
                 }
             }
 
-            if let Some(ref proxy) = self.proxy_url {
+            if let Some(proxy) = self.effective_proxy_url() {
                 if let Ok(p) = reqwest::Proxy::all(proxy.as_str()) {
                     builder = builder.proxy(p);
                 }
@@ -1110,6 +1137,79 @@ impl ObscuraHttpClient {
     /// requests through the same upstream proxy.
     pub fn proxy_url(&self) -> Option<&str> {
         self.proxy_url.as_deref()
+    }
+
+    /// Supply credentials received through CDP Fetch.continueWithAuth before
+    /// this context opens its first network connection. reqwest clients are
+    /// immutable after construction, so changing credentials after the lazy
+    /// client has been initialized would otherwise keep using the unauthenticated
+    /// proxy and loop on 407 responses.
+    pub fn set_proxy_credentials(
+        &self,
+        username: String,
+        password: String,
+    ) -> Result<(), ObscuraNetError> {
+        if self.proxy_url.is_none() {
+            return Err(ObscuraNetError::Network(
+                "cannot set proxy credentials without a configured proxy".to_string(),
+            ));
+        }
+        {
+            let current = self
+                .proxy_credentials
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if current.as_ref() == Some(&(username.clone(), password.clone())) {
+                return Ok(());
+            }
+        }
+        if self.client.get().is_some() {
+            return Err(ObscuraNetError::Network(
+                "proxy credentials arrived after the HTTP client was initialized".to_string(),
+            ));
+        }
+        *self
+            .proxy_credentials
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((username, password));
+        Ok(())
+    }
+
+    pub fn has_proxy_credentials(&self) -> bool {
+        if self
+            .proxy_url
+            .as_deref()
+            .and_then(|proxy| Url::parse(proxy).ok())
+            .is_some_and(|proxy| !proxy.username().is_empty() || proxy.password().is_some())
+        {
+            return true;
+        }
+        self.proxy_credentials
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
+    }
+
+    /// Return the proxy URL with any credentials learned through CDP embedded
+    /// in its userinfo. This form is also accepted by the stealth transport.
+    pub fn effective_proxy_url(&self) -> Option<String> {
+        let proxy = self.proxy_url.as_ref()?;
+        let credentials = self
+            .proxy_credentials
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let Some((username, password)) = credentials else {
+            return Some(proxy.clone());
+        };
+        let mut parsed = Url::parse(proxy).ok()?;
+        if parsed.set_username(&username).is_err() {
+            return Some(proxy.clone());
+        }
+        if parsed.set_password(Some(&password)).is_err() {
+            return Some(proxy.clone());
+        }
+        Some(parsed.to_string())
     }
 
     pub async fn fetch(&self, url: &Url) -> Result<Response, ObscuraNetError> {

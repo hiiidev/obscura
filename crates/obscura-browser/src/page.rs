@@ -303,6 +303,10 @@ pub struct Page {
     /// pending navigation that loads it. Committing that load moves the cursor
     /// to the entry instead of appending a new one.
     pending_history_traversal: std::sync::Mutex<Option<usize>>,
+    /// sessionStorage belongs to this top-level Page and is partitioned by
+    /// origin. It survives document replacement/reload but is never shared with
+    /// sibling pages in the same BrowserContext.
+    session_storage: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
     pub network_events: Vec<NetworkEvent>,
     response_bodies: std::collections::HashMap<String, StoredResponseBody>,
     response_body_order: std::collections::VecDeque<String>,
@@ -1083,10 +1087,12 @@ impl Page {
             // http://, which only works when the upstream happens to be a
             // Clash-style mixed-mode proxy and breaks plain SOCKS5 servers
             // like `ssh -ND` (#160).
-            Some(Arc::new(StealthHttpClient::with_proxy(
+            let proxy_url = context.effective_proxy_url();
+            Some(Arc::new(StealthHttpClient::with_proxy_and_user_agent(
                 context.cookie_jar.clone(),
-                context.proxy_url.as_deref(),
+                proxy_url.as_deref(),
                 context.allow_private_network,
+                &context.user_agent,
             )))
         } else {
             None
@@ -1121,6 +1127,7 @@ impl Page {
             history_index: 0,
             document_history_start: 0,
             pending_history_traversal: std::sync::Mutex::new(None),
+            session_storage: std::collections::HashMap::new(),
             network_events: Vec::new(),
             response_bodies: std::collections::HashMap::new(),
             response_body_order: std::collections::VecDeque::new(),
@@ -1139,6 +1146,40 @@ impl Page {
             callbacks: Arc::new(CallbackRegistry::new()),
             #[cfg(feature = "stealth")]
             stealth_client,
+        }
+    }
+
+    /// Rebuild the stealth transport after proxy credentials become available.
+    /// The ordinary HTTP client is lazy and reads credentials before its first
+    /// request; wreq is eager, so it must be recreated at the same ownership
+    /// boundary.
+    #[cfg(feature = "stealth")]
+    pub fn refresh_stealth_transport(&mut self) {
+        if !self.context.stealth {
+            self.stealth_client = None;
+            return;
+        }
+        let proxy_url = self.context.effective_proxy_url();
+        let user_agent = self
+            .http_client
+            .user_agent
+            .try_read()
+            .map(|value| value.clone())
+            .unwrap_or_else(|_| self.context.user_agent.clone());
+        self.stealth_client = Some(Arc::new(StealthHttpClient::with_proxy_and_user_agent(
+            self.context.cookie_jar.clone(),
+            proxy_url.as_deref(),
+            self.context.allow_private_network,
+            &user_agent,
+        )));
+    }
+
+    /// Keep ordinary and stealth network paths on the same User-Agent.
+    pub async fn set_user_agent_override(&self, user_agent: &str) {
+        self.http_client.set_user_agent(user_agent).await;
+        #[cfg(feature = "stealth")]
+        if let Some(client) = self.stealth_client.as_ref() {
+            client.set_user_agent(user_agent).await;
         }
     }
 
@@ -1746,6 +1787,111 @@ impl Page {
             .fetch_with_callbacks(url, Some(&self.callbacks))
             .await
     }
+    fn current_storage_origin(&self) -> Option<String> {
+        let url = self.url.as_ref()?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return None;
+        }
+        let origin = url.origin().ascii_serialization();
+        (origin != "null").then_some(origin)
+    }
+
+    fn read_web_storage(
+        js: &mut ObscuraJsRuntime,
+        name: &str,
+    ) -> std::collections::HashMap<String, String> {
+        let source = format!(
+            r#"(function() {{
+                const store = globalThis[{name:?}];
+                const out = Object.create(null);
+                for (let i = 0; i < store.length; i++) {{
+                    const key = store.key(i);
+                    if (key !== null) out[key] = store.getItem(key);
+                }}
+                return JSON.stringify(out);
+            }})()"#
+        );
+        let Ok(value) = js.evaluate(&source) else {
+            return std::collections::HashMap::new();
+        };
+        let Some(serialized) = value.as_str() else {
+            return std::collections::HashMap::new();
+        };
+        serde_json::from_str(serialized).unwrap_or_default()
+    }
+
+    /// Capture the outgoing document's storage before its V8 runtime is
+    /// replaced. localStorage is BrowserContext-owned; sessionStorage is
+    /// top-level-Page-owned.
+    fn snapshot_web_storage(&mut self) {
+        let Some(origin) = self.current_storage_origin() else {
+            return;
+        };
+        let Some(js) = self.js.as_mut() else {
+            return;
+        };
+        let local = Self::read_web_storage(js, "localStorage");
+        let session = Self::read_web_storage(js, "sessionStorage");
+        let indexed_db = js
+            .evaluate("globalThis.__obscura_idb_export?.() ?? '[]'")
+            .ok()
+            .and_then(|value| value.as_str().map(ToOwned::to_owned));
+        self.context
+            .local_storage
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(origin.clone(), local);
+        if let Some(indexed_db) = indexed_db {
+            self.context
+                .indexed_db_storage
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(origin.clone(), indexed_db);
+        }
+        self.session_storage.insert(origin, session);
+    }
+
+    fn restore_web_storage(&self, rt: &mut ObscuraJsRuntime) {
+        let Some(origin) = self.current_storage_origin() else {
+            return;
+        };
+        let local = self
+            .context
+            .local_storage
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&origin)
+            .cloned()
+            .unwrap_or_default();
+        let session = self
+            .session_storage
+            .get(&origin)
+            .cloned()
+            .unwrap_or_default();
+        let local_json = serde_json::to_string(&local).unwrap_or_else(|_| "{}".to_string());
+        let session_json = serde_json::to_string(&session).unwrap_or_else(|_| "{}".to_string());
+        let indexed_db = self
+            .context
+            .indexed_db_storage
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&origin)
+            .cloned()
+            .unwrap_or_else(|| "[]".to_string());
+        let indexed_db_json =
+            serde_json::to_string(&indexed_db).unwrap_or_else(|_| "\"[]\"".to_string());
+        let source = format!(
+            r#"(function() {{
+                const local = {local_json};
+                const session = {session_json};
+                for (const [key, value] of Object.entries(local)) localStorage.setItem(key, value);
+                for (const [key, value] of Object.entries(session)) sessionStorage.setItem(key, value);
+                globalThis.__obscura_idb_import?.({indexed_db_json});
+            }})()"#
+        );
+        let _ = rt.execute_script("<restore-web-storage>", &source);
+    }
+
     fn init_js(&mut self) {
         // init_js is also the new-document path.  Only resume_js explicitly
         // takes these IDs out before entering here and restores them after the
@@ -1774,7 +1920,7 @@ impl Page {
         // equivalent to with_base_url() (direct connection).
         let mut rt = ObscuraJsRuntime::with_base_url_and_proxy(
             &self.url_string(),
-            self.context.proxy_url.clone(),
+            self.context.effective_proxy_url(),
         );
         rt.set_url(&self.url_string());
         rt.set_encoding(&self.encoding);
@@ -1786,33 +1932,15 @@ impl Page {
         #[cfg(feature = "stealth")]
         if self.stealth_client.is_some() {
             rt.set_stealth(true);
-            rt.set_user_agent(obscura_net::STEALTH_USER_AGENT);
-            rt.set_platform(
-                obscura_net::STEALTH_NAVIGATOR_PLATFORM,
-                obscura_net::STEALTH_UA_PLATFORM,
-                obscura_net::STEALTH_UA_PLATFORM_VERSION,
-            );
-        } else {
-            if let Ok(ua) = self.http_client.user_agent.try_read() {
-                rt.set_user_agent(&ua);
-            }
-            rt.set_platform(
-                &self.context.platform,
-                &self.context.ua_platform,
-                &self.context.ua_platform_version,
-            );
         }
-        #[cfg(not(feature = "stealth"))]
-        {
-            if let Ok(ua) = self.http_client.user_agent.try_read() {
-                rt.set_user_agent(&ua);
-            }
-            rt.set_platform(
-                &self.context.platform,
-                &self.context.ua_platform,
-                &self.context.ua_platform_version,
-            );
+        if let Ok(ua) = self.http_client.user_agent.try_read() {
+            rt.set_user_agent(&ua);
         }
+        rt.set_platform(
+            &self.context.platform,
+            &self.context.ua_platform,
+            &self.context.ua_platform_version,
+        );
         rt.set_fingerprint_seed(self.context.fingerprint_seed);
         if let Some(locale) = &self.locale_override {
             rt.set_locale(locale);
@@ -1856,6 +1984,7 @@ impl Page {
 
         rt.set_navigation_timing(self.navigation_timing.clone());
         rt.run_page_init();
+        self.restore_web_storage(&mut rt);
         rt.set_reduced_motion(self.reduced_motion);
         let _ = rt.execute_script(
             "<device-metrics>",
@@ -3380,6 +3509,10 @@ impl Page {
     ) -> Result<(), PageError> {
         let url = Url::parse(url_str).map_err(|e| PageError::InvalidUrl(e.to_string()))?;
         self.navigation_timing = NavigationTiming::default();
+
+        // The old JS runtime is replaced at commit. Preserve origin-scoped Web
+        // Storage before self.url switches to the destination origin.
+        self.snapshot_web_storage();
 
         // The previous document's background loads end with the document.
         self.retire_render_resources();
@@ -5060,6 +5193,112 @@ mod tests {
         page.dom = Some(parse_html("<html><body></body></html>"));
         page.init_js();
         page
+    }
+
+    #[test]
+    fn web_storage_survives_document_runtime_replacement() {
+        let mut page = network_idle_test_page();
+        assert_eq!(
+            page.evaluate(r#"(() => {
+                localStorage.setItem('local-key', 'local-value');
+                sessionStorage.setItem('session-key', 'session-value');
+                return [localStorage.length, sessionStorage.length];
+            })()"#),
+            serde_json::json!([1, 1])
+        );
+
+        // A real full navigation snapshots immediately before replacing V8.
+        page.snapshot_web_storage();
+        page.js = None;
+        page.dom = Some(parse_html("<html><body>reloaded</body></html>"));
+        page.init_js();
+
+        assert_eq!(
+            page.evaluate("[localStorage.getItem('local-key'), sessionStorage.getItem('session-key')]"),
+            serde_json::json!(["local-value", "session-value"])
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn indexeddb_later_transaction_reads_committed_write() {
+        let mut page = network_idle_test_page();
+        let first = page
+            .evaluate_for_cdp_with_timeout(
+                r#"new Promise((resolve, reject) => {
+                    const request = indexedDB.open('regression-db', 1);
+                    request.onerror = () => reject(request.error || new Error('open failed'));
+                    request.onupgradeneeded = () => request.result.createObjectStore('items');
+                    request.onsuccess = () => {
+                        const db = request.result;
+                        const write = db.transaction('items', 'readwrite');
+                        write.onerror = () => reject(write.error || new Error('write failed'));
+                        write.objectStore('items').put({value: 42}, 'answer');
+                        write.oncomplete = () => {
+                            const read = db.transaction('items', 'readonly');
+                            read.onerror = () => reject(read.error || new Error('read failed'));
+                            const get = read.objectStore('items').get('answer');
+                            get.onerror = () => reject(get.error || new Error('get failed'));
+                            get.onsuccess = () => resolve(get.result?.value ?? null);
+                        };
+                    };
+                })"#,
+                true,
+                true,
+                1_000,
+            )
+            .await
+            .expect("IndexedDB transaction chain should settle");
+        assert_eq!(first.value, Some(serde_json::json!(42.0)));
+
+        // The same state is also BrowserContext-owned, so replacing the page
+        // runtime (the part reload/navigation does) must keep it.
+        page.snapshot_web_storage();
+        page.js = None;
+        page.dom = Some(parse_html("<html><body>reloaded</body></html>"));
+        page.init_js();
+
+        let reloaded = page
+            .evaluate_for_cdp_with_timeout(
+                r#"new Promise((resolve, reject) => {
+                    const request = indexedDB.open('regression-db', 1);
+                    request.onerror = () => reject(request.error || new Error('open failed'));
+                    request.onsuccess = () => {
+                        const read = request.result.transaction('items', 'readonly');
+                        read.onerror = () => reject(read.error || new Error('read failed'));
+                        const get = read.objectStore('items').get('answer');
+                        get.onerror = () => reject(get.error || new Error('get failed'));
+                        get.onsuccess = () => resolve(get.result?.value ?? null);
+                    };
+                })"#,
+                true,
+                true,
+                1_000,
+            )
+            .await
+            .expect("restored IndexedDB read should settle");
+        assert_eq!(reloaded.value, Some(serde_json::json!(42.0)));
+    }
+
+    #[cfg(feature = "render")]
+    #[test]
+    fn iframe_canvas_exposes_2d_context() {
+        let mut page = network_idle_test_page();
+        assert_eq!(
+            page.evaluate(r#"(() => {
+                const iframe = document.createElement('iframe');
+                document.body.appendChild(iframe);
+                const d = iframe.contentDocument;
+                const canvas = d.createElement('canvas');
+                canvas.width = 16;
+                canvas.height = 16;
+                d.body.appendChild(canvas);
+                const context = canvas.getContext('2d');
+                if (!context) return [false, null];
+                context.fillRect(0, 0, 4, 4);
+                return [true, typeof context.getImageData];
+            })()"#),
+            serde_json::json!([true, "function"])
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
