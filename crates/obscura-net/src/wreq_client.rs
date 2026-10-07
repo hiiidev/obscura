@@ -641,6 +641,7 @@ mod tests {
     };
     use crate::client::{ObscuraNetError, SsrfGuardResolver};
     use crate::cookies::CookieJar;
+    use crate::STEALTH_USER_AGENT;
     use wreq::dns::{Name, Resolve};
 
     // Mirrors client::ssrf_tests::resolver_blocks_hostname_that_resolves_to_loopback.
