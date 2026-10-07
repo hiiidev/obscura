@@ -5222,29 +5222,33 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn indexeddb_later_transaction_reads_committed_write() {
         let mut page = network_idle_test_page();
-        page.evaluate(r#"(() => {
-            globalThis.__idbRegression = null;
-            const request = indexedDB.open('regression-db', 1);
-            request.onupgradeneeded = () => request.result.createObjectStore('items');
-            request.onsuccess = () => {
-                const db = request.result;
-                const write = db.transaction('items', 'readwrite');
-                write.objectStore('items').put({value: 42}, 'answer');
-                write.oncomplete = () => {
-                    const read = db.transaction('items', 'readonly');
-                    const get = read.objectStore('items').get('answer');
-                    get.onsuccess = () => { globalThis.__idbRegression = get.result?.value ?? null; };
-                };
-            };
-            return true;
-        })()"#);
-        page.js
-            .as_mut()
-            .unwrap()
-            .run_event_loop_bounded(100)
+        let first = page
+            .evaluate_for_cdp_with_timeout(
+                r#"new Promise((resolve, reject) => {
+                    const request = indexedDB.open('regression-db', 1);
+                    request.onerror = () => reject(request.error || new Error('open failed'));
+                    request.onupgradeneeded = () => request.result.createObjectStore('items');
+                    request.onsuccess = () => {
+                        const db = request.result;
+                        const write = db.transaction('items', 'readwrite');
+                        write.onerror = () => reject(write.error || new Error('write failed'));
+                        write.objectStore('items').put({value: 42}, 'answer');
+                        write.oncomplete = () => {
+                            const read = db.transaction('items', 'readonly');
+                            read.onerror = () => reject(read.error || new Error('read failed'));
+                            const get = read.objectStore('items').get('answer');
+                            get.onerror = () => reject(get.error || new Error('get failed'));
+                            get.onsuccess = () => resolve(get.result?.value ?? null);
+                        };
+                    };
+                })"#,
+                true,
+                true,
+                1_000,
+            )
             .await
-            .expect("IndexedDB callbacks should drain");
-        assert_eq!(page.evaluate("__idbRegression"), serde_json::json!(42.0));
+            .expect("IndexedDB transaction chain should settle");
+        assert_eq!(first.value, Some(serde_json::json!(42.0)));
 
         // The same state is also BrowserContext-owned, so replacing the page
         // runtime (the part reload/navigation does) must keep it.
@@ -5252,25 +5256,27 @@ mod tests {
         page.js = None;
         page.dom = Some(parse_html("<html><body>reloaded</body></html>"));
         page.init_js();
-        page.evaluate(r#"(() => {
-            globalThis.__idbReload = null;
-            const request = indexedDB.open('regression-db', 1);
-            request.onsuccess = () => {
-                const get = request.result
-                    .transaction('items', 'readonly')
-                    .objectStore('items')
-                    .get('answer');
-                get.onsuccess = () => { globalThis.__idbReload = get.result?.value ?? null; };
-            };
-            return true;
-        })()"#);
-        page.js
-            .as_mut()
-            .unwrap()
-            .run_event_loop_bounded(100)
+
+        let reloaded = page
+            .evaluate_for_cdp_with_timeout(
+                r#"new Promise((resolve, reject) => {
+                    const request = indexedDB.open('regression-db', 1);
+                    request.onerror = () => reject(request.error || new Error('open failed'));
+                    request.onsuccess = () => {
+                        const read = request.result.transaction('items', 'readonly');
+                        read.onerror = () => reject(read.error || new Error('read failed'));
+                        const get = read.objectStore('items').get('answer');
+                        get.onerror = () => reject(get.error || new Error('get failed'));
+                        get.onsuccess = () => resolve(get.result?.value ?? null);
+                    };
+                })"#,
+                true,
+                true,
+                1_000,
+            )
             .await
-            .expect("restored IndexedDB callbacks should drain");
-        assert_eq!(page.evaluate("__idbReload"), serde_json::json!(42.0));
+            .expect("restored IndexedDB read should settle");
+        assert_eq!(reloaded.value, Some(serde_json::json!(42.0)));
     }
 
     #[cfg(feature = "render")]
