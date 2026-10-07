@@ -5244,7 +5244,7 @@ mod tests {
             .run_event_loop_bounded(100)
             .await
             .expect("IndexedDB callbacks should drain");
-        assert_eq!(page.evaluate("__idbRegression"), serde_json::json!(42));
+        assert_eq!(page.evaluate("__idbRegression"), serde_json::json!(42.0));
 
         // The same state is also BrowserContext-owned, so replacing the page
         // runtime (the part reload/navigation does) must keep it.
@@ -5270,7 +5270,7 @@ mod tests {
             .run_event_loop_bounded(100)
             .await
             .expect("restored IndexedDB callbacks should drain");
-        assert_eq!(page.evaluate("__idbReload"), serde_json::json!(42));
+        assert_eq!(page.evaluate("__idbReload"), serde_json::json!(42.0));
     }
 
     #[cfg(feature = "render")]
