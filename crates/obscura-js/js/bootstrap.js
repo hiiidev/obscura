@@ -724,7 +724,6 @@ function _getFp() {
     'ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version)',
     'ANGLE (Apple, ANGLE Metal Renderer: Apple M2 Pro, Unspecified Version)',
     'ANGLE (Apple, ANGLE Metal Renderer: Apple M3, Unspecified Version)',
-    'ANGLE (Intel Inc., ANGLE Metal Renderer: Intel(R) Iris(TM) Plus Graphics, Unspecified Version)',
   ] : isLinux ? [
     'ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL 4.6)',
     'ANGLE (Intel, Mesa Intel(R) Iris(R) Xe Graphics (TGL GT2), OpenGL 4.6)',
@@ -750,7 +749,6 @@ function _getFp() {
   const gpuVendorPool = isMac ? [
     'Google Inc. (Apple)','Google Inc. (Apple)','Google Inc. (Apple)',
     'Google Inc. (Apple)','Google Inc. (Apple)',
-    'Google Inc. (Intel Inc.)',
   ] : isLinux ? [
     'Google Inc. (Intel)','Google Inc. (Intel)','Google Inc. (Intel)',
     'Google Inc. (AMD)','Google Inc. (AMD)',
@@ -7426,6 +7424,20 @@ var _GREASE_VER = ['8', '99', '24'];
 var _BRAND_PERMS = [[0,1,2],[0,2,1],[1,0,2],[1,2,0],[2,0,1],[2,1,0]];
 function _uaBrands() {
   var seed = _chromeMajor();
+  // Exact Chrome desktop UA-CH presets shipped by the pinned wreq-util
+  // transport. Keep JS userAgentData byte-for-byte aligned with the HTTP
+  // sec-ch-ua identity for every stealth Chrome version we expose.
+  var exact = {
+    142: [['Chromium','142'], ['Google Chrome','142'], ['Not_A Brand','99']],
+    143: [['Google Chrome','143'], ['Chromium','143'], ['Not A(Brand','24']],
+    144: [['Not(A:Brand','8'], ['Chromium','144'], ['Google Chrome','144']],
+    145: [['Not:A-Brand','99'], ['Google Chrome','145'], ['Chromium','145']],
+    146: [['Chromium','146'], ['Not-A.Brand','24'], ['Google Chrome','146']],
+    147: [['Google Chrome','147'], ['Not.A/Brand','8'], ['Chromium','147']],
+    148: [['Chromium','148'], ['Google Chrome','148'], ['Not/A)Brand','99']],
+  }[seed];
+  if (exact) return exact.map(function(v) { return {brand:v[0], version:v[1]}; });
+
   var grease = {
     brand: 'Not' + _GREASE_CHARS[seed % 11] + 'A' + _GREASE_CHARS[(seed + 1) % 11] + 'Brand',
     version: _GREASE_VER[seed % 3],
@@ -7455,7 +7467,7 @@ globalThis.navigator = {
     getHighEntropyValues(hints) {
       var brands = _uaBrands();
       return Promise.resolve({
-        architecture: "x86",
+        architecture: (globalThis.__obscura_ua_platform || "Windows") === "macOS" ? "arm" : "x86",
         bitness: "64",
         brands: brands,
         fullVersionList: brands.map(function(b) { return {brand: b.brand, version: b.version + ".0.0.0"}; }),
