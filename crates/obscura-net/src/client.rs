@@ -1025,25 +1025,45 @@ fn chrome_client_hints(ua: &str) -> (String, String) {
         .and_then(|s| s.split('.').next())
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(145);
-    const GREASE_CHARS: [char; 11] = [' ', '(', ':', '-', '.', '/', ')', ';', '=', '?', '_'];
-    const GREASE_VER: [&str; 3] = ["8", "99", "24"];
-    const PERMS: [[usize; 3]; 6] = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
-    let grease_brand = format!(
-        "Not{}A{}Brand",
-        GREASE_CHARS[major % 11],
-        GREASE_CHARS[(major + 1) % 11]
-    );
-    let brands = [
-        (grease_brand, GREASE_VER[major % 3].to_string()),
-        ("Chromium".to_string(), major.to_string()),
-        ("Google Chrome".to_string(), major.to_string()),
-    ];
-    let p = PERMS[major % 6];
-    let sec_ch_ua = p
-        .iter()
-        .map(|&i| format!("\"{}\";v=\"{}\"", brands[i].0, brands[i].1))
-        .collect::<Vec<_>>()
-        .join(", ");
+
+    // These exact values mirror the pinned wreq-util Chrome 142-148 presets.
+    // Keeping the ordinary HTTP path on the same table also prevents a page
+    // from observing different brands between navigator.userAgentData and
+    // network requests when the selected profile is reused outside stealth.
+    let exact = match major {
+        142 => Some(r#""Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99""#),
+        143 => Some(r#""Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="24""#),
+        144 => Some(r#""Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144""#),
+        145 => Some(r#""Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145""#),
+        146 => Some(r#""Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146""#),
+        147 => Some(r#""Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147""#),
+        148 => Some(r#""Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99""#),
+        _ => None,
+    };
+
+    let sec_ch_ua = if let Some(value) = exact {
+        value.to_string()
+    } else {
+        const GREASE_CHARS: [char; 11] = [' ', '(', ':', '-', '.', '/', ')', ';', '=', '?', '_'];
+        const GREASE_VER: [&str; 3] = ["8", "99", "24"];
+        const PERMS: [[usize; 3]; 6] = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+        let grease_brand = format!(
+            "Not{}A{}Brand",
+            GREASE_CHARS[major % 11],
+            GREASE_CHARS[(major + 1) % 11]
+        );
+        let brands = [
+            (grease_brand, GREASE_VER[major % 3].to_string()),
+            ("Chromium".to_string(), major.to_string()),
+            ("Google Chrome".to_string(), major.to_string()),
+        ];
+        let p = PERMS[major % 6];
+        p.iter()
+            .map(|&i| format!("\"{}\";v=\"{}\"", brands[i].0, brands[i].1))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
     let platform = if ua.contains("Windows NT") {
         "\"Windows\""
     } else if ua.contains("Macintosh") {

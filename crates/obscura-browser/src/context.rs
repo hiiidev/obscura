@@ -145,33 +145,31 @@ impl BrowserContext {
         if stealth {
             client.block_trackers = true;
         }
-        let profile = crate::profiles::select_profile();
         #[cfg(feature = "stealth")]
-        let resolved_ua = user_agent.unwrap_or_else(|| {
-            if stealth {
-                obscura_net::STEALTH_USER_AGENT.to_string()
-            } else {
-                profile.user_agent.to_string()
-            }
-        });
+        let profile = if stealth {
+            // A stealth identity is atomic: UA, navigator platform, UA-CH and
+            // wreq transport emulation must all describe the same browser.
+            // Accept an explicit UA only when it exactly matches one of the
+            // supported complete identities; otherwise rotate a full profile.
+            user_agent
+                .as_deref()
+                .and_then(crate::profiles::profile_for_user_agent)
+                .unwrap_or_else(crate::profiles::select_stealth_profile)
+        } else {
+            crate::profiles::select_profile()
+        };
+        #[cfg(not(feature = "stealth"))]
+        let profile = crate::profiles::select_profile();
+
+        #[cfg(feature = "stealth")]
+        let resolved_ua = if stealth {
+            profile.user_agent.to_string()
+        } else {
+            user_agent.unwrap_or_else(|| profile.user_agent.to_string())
+        };
         #[cfg(not(feature = "stealth"))]
         let resolved_ua = user_agent.unwrap_or_else(|| profile.user_agent.to_string());
 
-        #[cfg(feature = "stealth")]
-        let (platform, ua_platform, ua_platform_version) = if stealth {
-            (
-                obscura_net::STEALTH_NAVIGATOR_PLATFORM.to_string(),
-                obscura_net::STEALTH_UA_PLATFORM.to_string(),
-                obscura_net::STEALTH_UA_PLATFORM_VERSION.to_string(),
-            )
-        } else {
-            (
-                profile.platform.to_string(),
-                profile.ua_platform.to_string(),
-                profile.ua_platform_version.to_string(),
-            )
-        };
-        #[cfg(not(feature = "stealth"))]
         let (platform, ua_platform, ua_platform_version) = (
             profile.platform.to_string(),
             profile.ua_platform.to_string(),
@@ -356,14 +354,27 @@ mod tests {
 
     #[cfg(feature = "stealth")]
     #[tokio::test(flavor = "current_thread")]
-    async fn stealth_context_uses_transport_user_agent_as_its_identity() {
+    async fn stealth_context_uses_one_complete_profile_identity() {
         let ctx = BrowserContext::with_options("stealth".to_string(), None, true);
-        assert_eq!(ctx.user_agent, obscura_net::STEALTH_USER_AGENT);
-        assert_eq!(
-            ctx.http_client.user_agent.read().await.as_str(),
-            obscura_net::STEALTH_USER_AGENT
+        let profile = crate::profiles::profile_for_user_agent(&ctx.user_agent)
+            .expect("stealth UA must come from the complete profile pool");
+        assert_eq!(ctx.http_client.user_agent.read().await.as_str(), profile.user_agent);
+        assert_eq!(ctx.platform, profile.platform);
+        assert_eq!(ctx.ua_platform, profile.ua_platform);
+        assert_eq!(ctx.ua_platform_version, profile.ua_platform_version);
+    }
+
+    #[cfg(feature = "stealth")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn unsupported_custom_stealth_ua_cannot_create_a_mismatched_identity() {
+        let ctx = BrowserContext::with_full_options(
+            "stealth-custom".to_string(),
+            None,
+            true,
+            Some("Mozilla/5.0 Chrome/999.0.0.0".to_string()),
         );
-        assert_eq!(ctx.platform, obscura_net::STEALTH_NAVIGATOR_PLATFORM);
+        assert_ne!(ctx.user_agent, "Mozilla/5.0 Chrome/999.0.0.0");
+        assert!(crate::profiles::profile_for_user_agent(&ctx.user_agent).is_some());
     }
 
     #[tokio::test(flavor = "current_thread")]

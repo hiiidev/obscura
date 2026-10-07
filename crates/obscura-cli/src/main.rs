@@ -1315,10 +1315,15 @@ async fn fetch_original_response(
             // CLI mirrors --allow-private-network into
             // OBSCURA_ALLOW_PRIVATE_NETWORK at startup, which this client
             // honours.
-            let client = obscura_net::StealthHttpClient::with_proxy(
+            let profile = user_agent
+                .as_deref()
+                .and_then(obscura_browser::profiles::profile_for_user_agent)
+                .unwrap_or_else(obscura_browser::profiles::select_stealth_profile);
+            let client = obscura_net::StealthHttpClient::with_proxy_and_user_agent(
                 Arc::new(obscura_net::CookieJar::new()),
                 proxy.as_deref(),
                 false,
+                profile.user_agent,
             );
             return match timeout(Duration::from_secs(timeout_secs), client.fetch(&url)).await {
                 Ok(Ok(resp)) => Ok(resp),
