@@ -15754,7 +15754,54 @@ globalThis.print = function() {}; _markNative(globalThis.print);
 globalThis.alert = function() {}; _markNative(globalThis.alert);
 globalThis.confirm = function() { return true; }; _markNative(globalThis.confirm);
 globalThis.prompt = function() { return null; }; _markNative(globalThis.prompt);
-globalThis.open = function() { return null; }; _markNative(globalThis.open);
+// A host-backed WindowProxy for an actual popup target. Only cross-origin-safe
+// operations are exposed; do not alias the source document into another window.
+function _popupWindowProxy(handle) {
+  const locationProxy = {
+    assign(url) { __obscuraCore.ops.op_window_navigate(handle, String(url)); },
+    replace(url) { __obscuraCore.ops.op_window_navigate(handle, String(url)); },
+    set href(url) { __obscuraCore.ops.op_window_navigate(handle, String(url)); },
+    get href() { throw new DOMException('Blocked cross-origin window access', 'SecurityError'); },
+  };
+  let proxy;
+  proxy = new Proxy(Object.create(null), {
+    get(_target, key) {
+      if (key === 'closed') return __obscuraCore.ops.op_window_closed(handle);
+      if (key === 'close') return () => __obscuraCore.ops.op_window_close(handle);
+      if (key === 'location') return locationProxy;
+      if (key === 'focus' || key === 'blur') return () => {};
+      if (key === 'window' || key === 'self') return proxy;
+      if (key === 'then') return undefined;
+      if (key === Symbol.toStringTag) return 'Window';
+      throw new DOMException('Blocked cross-origin window access', 'SecurityError');
+    },
+    set(_target, key, value) {
+      if (key === 'location') {
+        __obscuraCore.ops.op_window_navigate(handle, String(value));
+        return true;
+      }
+      throw new DOMException('Blocked cross-origin window access', 'SecurityError');
+    },
+  });
+  return proxy;
+}
+globalThis.open = function(url = '', target = '_blank', features = '') {
+  // Named-window reuse and special targets need a separate lifecycle
+  // implementation. Do not turn unsupported targets into fake windows.
+  const name = String(target || '_blank');
+  if (name !== '_blank') return null;
+  let resolved = 'about:blank';
+  if (url !== '' && url != null) {
+    try { resolved = new URL(String(url), document.baseURI || location.href).href; }
+    catch (_) { return null; }
+  }
+  const featureList = String(features || '').toLowerCase().split(',').map(s => s.trim());
+  const noopener = featureList.some(s => /^(noopener|noreferrer)(?:=(?:yes|1|true))?$/.test(s));
+  const handle = __obscuraCore.ops.op_window_open(resolved, noopener);
+  if (!handle || noopener) return null;
+  return _popupWindowProxy(handle);
+};
+_markNative(globalThis.open);
 globalThis.close = function() {}; _markNative(globalThis.close);
 globalThis.stop = function() {}; _markNative(globalThis.stop);
 // `window.postMessage` targets this same window. It was a no-op, so a page
