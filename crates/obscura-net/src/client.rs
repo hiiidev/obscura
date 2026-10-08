@@ -952,6 +952,7 @@ impl ResourceCache {
         if entry.expires_at <= Instant::now() {
             let expired = self.entries.remove(key)?;
             self.body_bytes = self.body_bytes.saturating_sub(expired.response.body.len());
+            self.insertion_order.retain(|queued| queued != key);
             return None;
         }
         Some(entry.response.clone())
@@ -1817,6 +1818,78 @@ pub enum ObscuraNetError {
 
     #[error("Response body exceeded {limit} byte limit: {url}")]
     ResponseTooLarge { url: String, limit: usize },
+}
+
+#[cfg(test)]
+mod resource_cache_tests {
+    use super::{ResourceCache, ResourceCacheKey, ResourceType, RequestMode,
+        RequestCredentials, Response, RESOURCE_CACHE_MAX_ENTRIES};
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+    use url::Url;
+
+    fn cache_test_resource(name: &str) -> (ResourceCacheKey, Response) {
+        let url = Url::parse(&format!("https://example.test/{name}.js")).unwrap();
+        let key = ResourceCacheKey {
+            url: url.to_string(),
+            resource_type: ResourceType::Script,
+            mode: RequestMode::NoCors,
+            credentials: RequestCredentials::Omit,
+            initiator: None,
+            referrer: None,
+            user_agent: "cache-test".into(),
+            extra_headers: Vec::new(),
+            max_response_bytes: 1024,
+        };
+        let response = Response {
+            url,
+            status: 200,
+            headers: HashMap::new(),
+            body: vec![1],
+            redirected_from: Vec::new(),
+        };
+        (key, response)
+    }
+
+    #[test]
+    fn expired_resource_cache_keys_do_not_accumulate() {
+        let (key, response) = cache_test_resource("reused");
+        let mut cache = ResourceCache::default();
+        for _ in 0..10_000 {
+            cache.insert(key.clone(), response.clone(), Duration::from_secs(60));
+            cache.entries.get_mut(&key).unwrap().expires_at = Instant::now();
+            assert!(cache.get(&key).is_none());
+            assert!(cache.entries.is_empty());
+            assert!(cache.insertion_order.is_empty());
+            assert_eq!(cache.body_bytes, 0);
+        }
+        cache.insert(key.clone(), response, Duration::from_secs(60));
+        assert!(cache.get(&key).is_some());
+        assert_eq!(cache.insertion_order.len(), 1);
+        assert_eq!(cache.body_bytes, 1);
+    }
+
+    #[test]
+    fn expired_then_reinserted_resource_keeps_its_new_eviction_position() {
+        let (reused, response) = cache_test_resource("reused");
+        let (oldest, oldest_response) = cache_test_resource("oldest");
+        let mut cache = ResourceCache::default();
+        cache.insert(reused.clone(), response.clone(), Duration::from_secs(60));
+        cache.entries.get_mut(&reused).unwrap().expires_at = Instant::now();
+        assert!(cache.get(&reused).is_none());
+        cache.insert(oldest.clone(), oldest_response, Duration::from_secs(60));
+        cache.insert(reused.clone(), response, Duration::from_secs(60));
+        for index in 0..RESOURCE_CACHE_MAX_ENTRIES - 1 {
+            let (key, response) = cache_test_resource(&format!("fill-{index}"));
+            cache.insert(key, response, Duration::from_secs(60));
+        }
+        assert!(cache.get(&oldest).is_none(), "evict the oldest live entry");
+        assert!(cache.get(&reused).is_some(), "keep the refreshed entry");
+        assert_eq!(cache.entries.len(), RESOURCE_CACHE_MAX_ENTRIES);
+        assert_eq!(cache.insertion_order.len(), RESOURCE_CACHE_MAX_ENTRIES);
+        assert_eq!(cache.body_bytes, RESOURCE_CACHE_MAX_ENTRIES);
+    }
+
 }
 
 #[cfg(test)]
