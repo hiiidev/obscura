@@ -182,20 +182,11 @@ pub async fn handle(
                     }
                 });
             if let Some(frame_id) = child_frame {
-                if !return_by_value {
-                    return Err("Child-frame Runtime.evaluate currently requires returnByValue=true; frame-scoped object handles are not implemented".into());
-                }
                 let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
-                let value = page.evaluate_in_child_frame(frame_id, expression)?;
-                let remote = match &value {
-                    Value::Null => json!({"type":"object","subtype":"null","value":null}),
-                    Value::Bool(_) => json!({"type":"boolean","value":value}),
-                    Value::Number(_) => json!({"type":"number","value":value}),
-                    Value::String(_) => json!({"type":"string","value":value}),
-                    Value::Array(_) => json!({"type":"object","subtype":"array","value":value}),
-                    Value::Object(_) => json!({"type":"object","value":value}),
-                };
-                return Ok(json!({"result":remote}));
+                let remote = page.evaluate_child_frame_for_cdp(
+                    frame_id, expression, return_by_value,
+                )?;
+                return Ok(json!({"result": remote}));
             }
 
             let await_promise = params
@@ -264,6 +255,41 @@ pub async fn handle(
             // `objectId` is supplied — in that case context validation is a
             // no-op and the default context is used.
             validate_context(params, "executionContextId", ctx, session_id, "callFunctionOn")?;
+
+            // A Playwright locator may supply either the child executionContextId
+            // (initial call) or a child-owned objectId (subsequent calls). Both
+            // must execute inside the same FrameRealm, never the top-level page.
+            let context_frame = params.get("executionContextId").and_then(Value::as_i64)
+                .and_then(|id| ctx.context_by_id(id))
+                .or_else(|| params.get("uniqueContextId").and_then(Value::as_str)
+                    .and_then(|id| ctx.context_by_unique_id(id)))
+                .and_then(|record| {
+                    let page = ctx.get_session_page(session_id)?;
+                    record.frame_id.strip_prefix(&format!("{}-frame-", page.frame_id))
+                        .and_then(|id| id.parse::<u32>().ok())
+                });
+            let object_frame = object_id.and_then(|id| id.strip_prefix("frame:"))
+                .and_then(|rest| rest.split_once(':'))
+                .and_then(|(frame, _)| frame.parse::<u32>().ok());
+            if let (Some(a), Some(b)) = (context_frame, object_frame) {
+                if a != b { return Err("Remote object belongs to a different frame".into()); }
+            }
+            if let Some(frame_id) = context_frame.or(object_frame) {
+                let timeout_ms = params.get("timeout").and_then(Value::as_u64)
+                    .unwrap_or(30_000).min(60_000);
+                let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
+                let remote = tokio::time::timeout(
+                    std::time::Duration::from_millis(timeout_ms),
+                    page.call_function_in_child_frame_for_cdp(
+                        frame_id, function_declaration, object_id, &arguments,
+                        return_by_value, await_promise, timeout_ms,
+                    ),
+                ).await.map_err(|_| format!(
+                    "Child frame Runtime.callFunctionOn exceeded {timeout_ms}ms timeout"
+                ))??;
+                emit_post_eval_nav(ctx, session_id).await?;
+                return Ok(json!({"result": remote}));
+            }
 
             // Keep awaitPromise alive for the same command budget as evaluate.
             // Playwright implements waits with callFunctionOn on some utility
@@ -688,12 +714,37 @@ mod tests {
             &mut ctx, &session,
         ).await.expect("evaluate in child frame");
         assert_eq!(reply["result"]["value"], json!("https://child.example/iframe.html"));
-        let error = handle(
+        let remote = handle(
             "evaluate",
             &json!({"contextId":record.id,"expression":"document.body", "returnByValue":false}),
             &mut ctx, &session,
-        ).await.expect_err("no fake frame object handles");
-        assert!(error.contains("returnByValue=true"));
+        ).await.expect("frame-owned remote object");
+        assert_eq!(remote["result"]["subtype"], "node");
+        assert!(remote["result"]["objectId"].as_str().unwrap().starts_with("frame:1:"));
+        let oid = remote["result"]["objectId"].as_str().unwrap().to_string();
+        let text = handle(
+            "callFunctionOn",
+            &json!({
+                "objectId": oid,
+                "functionDeclaration": "function() { return this.tagName; }",
+                "returnByValue": true
+            }),
+            &mut ctx, &session,
+        ).await.expect("callFunctionOn must use the frame-owned object");
+        assert_eq!(text["result"]["value"], "BODY");
+
+        let value = handle(
+            "callFunctionOn",
+            &json!({
+                "executionContextId": record.id,
+                "functionDeclaration": "async function() { return document.body.tagName + ':' + location.hostname; }",
+                "returnByValue": true,
+                "awaitPromise": true,
+                "timeout": 2500
+            }),
+            &mut ctx, &session,
+        ).await.expect("child frame awaited function");
+        assert_eq!(value["result"]["value"], "BODY:child.example");
     }
 
     #[tokio::test]
