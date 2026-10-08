@@ -4,6 +4,13 @@ on:
   push:
     tags:
       - 'v*'
+    branches:
+      - 'release/session-test-6'
+
+# Only the temporary build-6 release branch overrides the embedded version.
+# Regular tag releases continue deriving the version from GITHUB_REF.
+env:
+  OBSCURA_VERSION: ${{ github.ref_type == 'branch' && 'v0.0.0-session-test.6' || '' }}
 
 permissions:
   contents: read
@@ -216,3 +223,6 @@ jobs:
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: dist/*
+          tag_name: ${{ github.ref_type == 'branch' && 'v0.0.0-session-test.6' || github.ref_name }}
+          name: ${{ github.ref_type == 'branch' && 'Session fingerprint test build 6' || github.ref_name }}
+          target_commitish: ${{ github.ref_type == 'branch' && 'main' || github.sha }}
