@@ -178,6 +178,10 @@ pub struct ObscuraState {
     #[cfg(feature = "stealth")]
     pub stealth_client: Option<Arc<StealthHttpClient>>,
     pub pending_navigation: Option<(String, String, String)>,
+    /// Popup actions are queued synchronously from JS and processed only by the owning browser.
+    pub pending_window_actions: VecDeque<WindowAction>,
+    pub next_window_handle: u32,
+    pub closed_window_handles: HashSet<u32>,
     /// The tab's session history as the owning page sees it: entry URLs, the
     /// index of this document's first entry, and the current index. Empty
     /// for frames and for runtimes outside a page, where `history` only
@@ -433,6 +437,9 @@ impl ObscuraState {
             #[cfg(feature = "stealth")]
             stealth_client: None,
             pending_navigation: None,
+            pending_window_actions: VecDeque::new(),
+            next_window_handle: 0,
+            closed_window_handles: HashSet::new(),
             session_history: SessionHistory::default(),
             pending_history_traversal: None,
             intercept_tx: None,
@@ -5685,6 +5692,68 @@ fn op_history_traverse(scope: &mut v8::PinScope, state: &OpState, index: u32) ->
     true
 }
 
+/// One synchronous JS window request. The CDP owner determines the source Page,
+/// BrowserContext and transport; page scripts cannot choose their own context.
+#[derive(Debug, Clone)]
+pub enum WindowAction {
+    Open { handle: u32, url: String, frame_id: u32, noopener: bool },
+    Navigate { handle: u32, url: String },
+    Close { handle: u32 },
+}
+
+/// Allocate an opaque handle immediately while deferring Page creation until
+/// the script exits V8. A real window target is created by the CDP owner.
+#[op2(fast)]
+fn op_window_open(scope: &mut v8::PinScope, state: &OpState, #[string] url: &str, noopener: bool) -> u32 {
+    let realm = realm_state(scope, state);
+    let frame_id = realm.borrow().frame_id;
+    let page = state.borrow::<SharedState>().clone();
+    let mut state = page.borrow_mut();
+    if url.len() > 16_384 || state.pending_window_actions.len() >= 32 {
+        return 0;
+    }
+    let Some(handle) = state.next_window_handle.checked_add(1) else {
+        return 0;
+    };
+    state.next_window_handle = handle;
+    state.pending_window_actions.push_back(WindowAction::Open {
+        handle, url: url.to_string(), frame_id, noopener,
+    });
+    handle
+}
+
+#[op2(fast)]
+fn op_window_closed(state: &OpState, handle: u32) -> bool {
+    let page = state.borrow::<SharedState>().clone();
+    let state = page.borrow();
+    handle == 0 || state.closed_window_handles.contains(&handle)
+}
+
+#[op2(fast)]
+fn op_window_close(state: &OpState, handle: u32) {
+    let page = state.borrow::<SharedState>().clone();
+    let mut state = page.borrow_mut();
+    if handle > 0 && handle <= state.next_window_handle {
+        state.pending_window_actions.push_back(WindowAction::Close { handle });
+        state.closed_window_handles.insert(handle);
+    }
+}
+
+#[op2(fast)]
+fn op_window_navigate(state: &OpState, handle: u32, #[string] url: &str) {
+    let page = state.borrow::<SharedState>().clone();
+    let mut state = page.borrow_mut();
+    if handle > 0 && handle <= state.next_window_handle
+        && !state.closed_window_handles.contains(&handle)
+        && url.len() <= 16_384
+        && state.pending_window_actions.len() < 32
+    {
+        state.pending_window_actions.push_back(WindowAction::Navigate {
+            handle, url: url.to_string(),
+        });
+    }
+}
+
 // A frame that navigates itself must not move the top document. Recording the
 // navigation against the calling realm keeps it inside that frame.
 #[op2(fast)]
@@ -6883,6 +6952,10 @@ pub fn build_extension() -> Extension {
         op_get_cookies(),
         op_set_cookie(),
         op_navigate(),
+        op_window_open(),
+        op_window_closed(),
+        op_window_close(),
+        op_window_navigate(),
         op_session_history(),
         op_history_traverse(),
         op_frame_document_ready(),
