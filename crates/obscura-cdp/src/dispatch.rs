@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use obscura_browser::{BrowserContext, Page};
@@ -48,6 +48,13 @@ pub(crate) struct ExecutionContextRecord {
     pub is_default: bool,
 }
 
+#[derive(Clone)]
+pub(crate) struct PopupTargetInfo {
+    pub opener_id: Option<String>,
+    pub opener_frame_id: Option<String>,
+    pub closed: Arc<std::sync::atomic::AtomicBool>,
+}
+
 pub struct CdpContext {
     pub pages: Vec<Page>,
     pub sessions: HashMap<String, String>, // session_id -> page_id
@@ -64,6 +71,9 @@ pub struct CdpContext {
     /// is announced once and a frame that goes away can be retracted.
     pub announced_frames: HashMap<String, Vec<String>>,
     pub pending_events: Vec<CdpEvent>,
+    pub(crate) popup_targets: HashMap<String, PopupTargetInfo>,
+    pub(crate) popup_handles: HashMap<String, String>,
+    pub(crate) pending_popup_navigations: VecDeque<(String, String)>,
     #[cfg(feature = "render")]
     pub(crate) screencasts: HashMap<String, ScreencastState>,
     #[cfg(feature = "render")]
@@ -178,6 +188,9 @@ impl CdpContext {
             nav_events_emitted: std::collections::HashSet::new(),
             announced_frames: HashMap::new(),
             pending_events: Vec::new(),
+            popup_targets: HashMap::new(),
+            popup_handles: HashMap::new(),
+            pending_popup_navigations: VecDeque::new(),
             #[cfg(feature = "render")]
             screencasts: HashMap::new(),
             #[cfg(feature = "render")]
@@ -339,6 +352,11 @@ impl CdpContext {
     }
 
     pub fn remove_page(&mut self, id: &str) {
+        if let Some(info) = self.popup_targets.remove(id) {
+            info.closed.store(true, std::sync::atomic::Ordering::Release);
+        }
+        self.popup_handles.retain(|_, target_id| target_id != id);
+        self.pending_popup_navigations.retain(|(target_id, _)| target_id != id);
         let removed_sessions: Vec<String> = self
             .sessions
             .iter()
@@ -856,6 +874,7 @@ pub async fn dispatch(req: &CdpRequest, ctx: &mut CdpContext) -> CdpResponse {
         }
     }
 
+    drain_popup_requests(ctx);
     drain_runtime_events(ctx);
     drain_binding_calls(ctx);
     drain_frame_events(ctx);
@@ -865,6 +884,96 @@ pub async fn dispatch(req: &CdpRequest, ctx: &mut CdpContext) -> CdpResponse {
         Err(msg) => {
             tracing::warn!("CDP error for {}: {}", req.method, msg);
             CdpResponse::error(req.id, -32601, msg, req.session_id.clone())
+        }
+    }
+}
+
+/// Converts synchronous JS window.open reservations into real Page targets.
+/// The opener's BrowserContext, proxy identity and sessionStorage are
+/// determined by the Rust Page, never by a frame-provided context identifier.
+pub(crate) fn drain_popup_requests(ctx: &mut CdpContext) {
+    let mut openings = Vec::new();
+    let mut closes = Vec::new();
+    for page in &ctx.pages {
+        let owner = page.id.clone();
+        openings.extend(page.take_pending_popups().into_iter().map(|popup| (owner.clone(), popup)));
+        closes.extend(page.take_pending_popup_closes());
+    }
+    for handle in closes {
+        if let Some(target_id) = ctx.popup_handles.get(&handle).cloned() {
+            ctx.pending_events.push(CdpEvent::new(
+                "Target.targetDestroyed", json!({"targetId": target_id})
+            ));
+            ctx.remove_page(&target_id);
+        }
+    }
+    for (owner_id, popup) in openings {
+        if popup.closed.load(std::sync::atomic::Ordering::Acquire) {
+            continue;
+        }
+        let Some(opener) = ctx.get_page_mut(&owner_id) else { continue; };
+        let context_id = opener.context.id.clone();
+        let allow_file = opener.context.allow_file_access;
+        let session_storage = opener.snapshot_popup_session_storage();
+        let opener_frame_id = if popup.frame_id == 0 {
+            opener.frame_id.clone()
+        } else {
+            format!("{}-frame-{}", opener.frame_id, popup.frame_id)
+        };
+        let allowed_url = url::Url::parse(&popup.url).is_ok_and(|parsed| {
+            matches!(parsed.scheme(), "http" | "https" | "about" | "data")
+                || (parsed.scheme() == "file" && allow_file)
+        });
+        if !allowed_url {
+            popup.closed.store(true, std::sync::atomic::Ordering::Release);
+            continue;
+        }
+        let Ok(target_id) = ctx.create_page_in_context(Some(&context_id)) else { continue; };
+        if let Some(page) = ctx.get_page_mut(&target_id) {
+            page.install_popup_session_storage(session_storage);
+        }
+        ctx.popup_handles.insert(popup.handle.clone(), target_id.clone());
+        ctx.popup_targets.insert(target_id.clone(), PopupTargetInfo {
+            opener_id: (!popup.no_opener).then(|| owner_id.clone()),
+            opener_frame_id: (!popup.no_opener).then_some(opener_frame_id),
+            closed: popup.closed,
+        });
+        let source_sessions: Vec<_> = ctx.sessions.iter()
+            .filter(|(_, page)| *page == &owner_id)
+            .map(|(session, _)| session.clone()).collect();
+        for session in source_sessions {
+            ctx.pending_events.push(CdpEvent::with_session(
+                "Page.windowOpen",
+                json!({"url": popup.url, "windowName": "_blank",
+                       "windowFeatures": [], "userGesture": false}),
+                session,
+            ));
+        }
+        let page = ctx.get_page(&target_id).expect("created target");
+        let mut info = json!({
+            "targetId": target_id, "type": "page", "title": page.title,
+            "url": page.url_string(), "attached": false,
+            "browserContextId": page.context.id, "canAccessOpener": !popup.no_opener,
+        });
+        if let Some(opener) = ctx.popup_targets[&target_id].opener_id.as_ref() {
+            info["openerId"] = json!(opener);
+        }
+        if let Some(frame) = ctx.popup_targets[&target_id].opener_frame_id.as_ref() {
+            info["openerFrameId"] = json!(frame);
+        }
+        ctx.pending_events.push(CdpEvent::new(
+            "Target.targetCreated", json!({"targetInfo": info})
+        ));
+        let session_id = ctx.next_target_session(&target_id);
+        ctx.sessions.insert(session_id.clone(), target_id.clone());
+        info["attached"] = json!(true);
+        ctx.pending_events.push(CdpEvent::new(
+            "Target.attachedToTarget",
+            json!({"sessionId": session_id, "targetInfo": info,
+                   "waitingForDebugger": false}),
+        ));
+        if popup.url != "about:blank" {
+            ctx.pending_popup_navigations.push_back((session_id, popup.url));
         }
     }
 }
