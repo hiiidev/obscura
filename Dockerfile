@@ -3,6 +3,8 @@ FROM rust:1-slim-bookworm AS builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         ca-certificates \
+        git \
+        python3 \
         perl \
         make \
         cmake \
@@ -43,7 +45,7 @@ ARG OBSCURA_VERSION
 # Copy real sources and build
 COPY crates/ crates/
 RUN echo "Building Obscura version ${OBSCURA_VERSION:-from Cargo.toml}" && \
-    touch crates/*/src/*.rs && cargo build --release -p obscura-cli --features render,stealth --bin obscura --bin obscura-worker
+    touch crates/*/src/*.rs && OBSCURA_VERSION="${OBSCURA_VERSION}" cargo build --release -p obscura-cli --features render,stealth --bin obscura --bin obscura-worker
 
 # ---
 
