@@ -237,6 +237,9 @@ pub enum PendingNavigationOutcome {
 }
 
 pub struct Page {
+    /// The actual opener target for a JavaScript-created popup.
+    pub opener_id: Option<String>,
+    pub opener_frame_id: Option<String>,
     pub id: String,
     pub frame_id: String,
     pub url: Option<Url>,
@@ -1099,6 +1102,8 @@ impl Page {
         };
 
         Page {
+            opener_id: None,
+            opener_frame_id: None,
             id,
             frame_id,
             url: None,
@@ -4873,6 +4878,29 @@ impl Page {
         if let Some(js) = &mut self.js {
             js.release_object_group();
         }
+    }
+
+    /// Window requests may come from ordinary script evaluation or autonomous
+    /// timers. Only the CDP host creates the target, using this Page's Context.
+    pub fn take_pending_window_actions(&self) -> Vec<obscura_js::ops::WindowAction> {
+        self.js.as_ref()
+            .map(|js| js.take_pending_window_actions())
+            .unwrap_or_default()
+    }
+
+    pub fn mark_window_closed(&self, handle: u32) {
+        if let Some(js) = &self.js { js.mark_window_closed(handle); }
+    }
+
+    /// sessionStorage is copied once for a popup with an opener. Its subsequent
+    /// writes belong to the new Page and cannot mutate the opener's store.
+    pub fn popup_session_storage_snapshot(&mut self) -> std::collections::HashMap<String, std::collections::HashMap<String, String>> {
+        self.snapshot_web_storage();
+        self.session_storage.clone()
+    }
+
+    pub fn inherit_popup_session_storage(&mut self, snapshot: std::collections::HashMap<String, std::collections::HashMap<String, String>>) {
+        self.session_storage = snapshot;
     }
 
     pub fn take_pending_navigation(&self) -> Option<(String, String, String)> {
