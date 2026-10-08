@@ -162,6 +162,42 @@ pub async fn handle(
 
             validate_context(params, "contextId", ctx, session_id, "evaluate")?;
 
+            // CDP's contextId identifies a JS realm, not just an owning tab.
+            // Previously validate_context checked ownership but evaluation
+            // always ran against the top-level V8 global, even for a child
+            // iframe. Route serializable child expressions into the frame's
+            // existing independent v8::Context.
+            let child_frame = params.get("contextId").and_then(Value::as_i64)
+                .and_then(|id| ctx.context_by_id(id))
+                .or_else(|| params.get("uniqueContextId")
+                    .and_then(Value::as_str)
+                    .and_then(|id| ctx.context_by_unique_id(id)))
+                .and_then(|record| {
+                    let page = ctx.get_session_page(session_id)?;
+                    if record.frame_id == page.frame_id {
+                        None
+                    } else {
+                        record.frame_id.strip_prefix(&format!("{}-frame-", page.frame_id))
+                            .and_then(|id| id.parse::<u32>().ok())
+                    }
+                });
+            if let Some(frame_id) = child_frame {
+                if !return_by_value {
+                    return Err("Child-frame Runtime.evaluate currently requires returnByValue=true; frame-scoped object handles are not implemented".into());
+                }
+                let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
+                let value = page.evaluate_in_child_frame(frame_id, expression)?;
+                let remote = match &value {
+                    Value::Null => json!({"type":"object","subtype":"null","value":null}),
+                    Value::Bool(_) => json!({"type":"boolean","value":value}),
+                    Value::Number(_) => json!({"type":"number","value":value}),
+                    Value::String(_) => json!({"type":"string","value":value}),
+                    Value::Array(_) => json!({"type":"object","subtype":"array","value":value}),
+                    Value::Object(_) => json!({"type":"object","value":value}),
+                };
+                return Ok(json!({"result":remote}));
+            }
+
             let await_promise = params
                 .get("awaitPromise")
                 .and_then(|v| v.as_bool())
@@ -624,6 +660,41 @@ mod tests {
     //   - Without the prod fix, `valid_context_ids` does not exist on
     //     CdpContext → these tests fail to compile.
     //   - With the prod fix, all four tests pass.
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn evaluation_with_child_context_id_runs_in_child_realm() {
+        let mut ctx = CdpContext::new();
+        let page_id = ctx.create_page();
+        let session = Some("child-realm-eval".to_string());
+        ctx.sessions.insert(session.clone().unwrap(), page_id.clone());
+        {
+            let page = ctx.get_page_mut(&page_id).unwrap();
+            page.resume_js();
+            let frame = obscura_js::frame::FrameRealm::new(
+                page.js.as_mut().unwrap(), 1, 0,
+                "https://child.example/iframe.html",
+                "<html><body><script>globalThis.childValue = 42;</script></body></html>",
+            ).expect("child V8 realm");
+            page.frames.push(frame);
+            page.evaluate("globalThis.childValue = 'parent-only'");
+        }
+        let frame_name = format!("{page_id}-frame-1");
+        let (record, _) = ctx.create_isolated_context(
+            &page_id, &frame_name, "https://child.example/iframe.html", "test-world", false,
+        );
+        let reply = handle(
+            "evaluate",
+            &json!({"contextId":record.id, "expression":"location.href", "returnByValue":true}),
+            &mut ctx, &session,
+        ).await.expect("evaluate in child frame");
+        assert_eq!(reply["result"]["value"], json!("https://child.example/iframe.html"));
+        let error = handle(
+            "evaluate",
+            &json!({"contextId":record.id,"expression":"document.body", "returnByValue":false}),
+            &mut ctx, &session,
+        ).await.expect_err("no fake frame object handles");
+        assert!(error.contains("returnByValue=true"));
+    }
 
     #[tokio::test]
     async fn evaluate_rejects_unknown_context_id() {

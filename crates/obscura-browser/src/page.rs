@@ -4865,6 +4865,22 @@ impl Page {
         }
     }
 
+    /// Evaluate a serializable expression in the *actual* child frame V8
+    /// Context, not in the top-level page global. Intended for CDP's
+    /// returnByValue frame evaluation path; opaque object handles need a
+    /// separate frame-aware remote-object registry.
+    pub fn evaluate_in_child_frame(
+        &mut self,
+        frame_id: u32,
+        expression: &str,
+    ) -> Result<serde_json::Value, String> {
+        let frame = self.frames.iter()
+            .find(|frame| frame.frame_id() == frame_id)
+            .ok_or_else(|| format!("Frame {frame_id} is no longer attached"))?;
+        let runtime = self.js.as_mut().ok_or("No JavaScript runtime")?;
+        frame.evaluate(runtime, expression)
+    }
+
     pub fn has_js(&self) -> bool {
         self.js.is_some()
     }
