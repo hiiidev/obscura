@@ -29,17 +29,7 @@ pub async fn handle(
             for page in &ctx.pages {
                 ctx.pending_events.push(CdpEvent::new(
                     "Target.targetCreated",
-                    json!({
-                        "targetInfo": {
-                            "targetId": page.id,
-                            "type": "page",
-                            "title": page.title,
-                            "url": page.url_string(),
-                            "attached": false,
-                            "canAccessOpener": false,
-                            "browserContextId": page.context.id,
-                        }
-                    }),
+                    json!({"targetInfo": crate::popup::target_info(ctx, page, false)}),
                 ));
             }
             Ok(json!({}))
@@ -48,17 +38,7 @@ pub async fn handle(
             let targets: Vec<Value> = ctx
                 .pages
                 .iter()
-                .map(|page| {
-                    json!({
-                        "targetId": page.id,
-                        "type": "page",
-                        "title": page.title,
-                        "url": page.url_string(),
-                        "attached": true,
-                        "canAccessOpener": false,
-                        "browserContextId": page.context.id,
-                    })
-                })
+                .map(|page| crate::popup::target_info(ctx, page, true))
                 .collect();
             Ok(json!({ "targetInfos": targets }))
         }
@@ -112,17 +92,7 @@ pub async fn handle(
             if let Some(page) = ctx.get_page(&page_id) {
                 ctx.pending_events.push(CdpEvent::new(
                     "Target.targetCreated",
-                    json!({
-                        "targetInfo": {
-                            "targetId": page_id,
-                            "type": "page",
-                            "title": page.title,
-                            "url": page.url_string(),
-                            "attached": false,
-                            "canAccessOpener": false,
-                            "browserContextId": page.context.id,
-                        }
-                    }),
+                    json!({"targetInfo": crate::popup::target_info(ctx, page, false)}),
                 ));
             }
 
@@ -131,15 +101,7 @@ pub async fn handle(
                     "Target.attachedToTarget",
                     json!({
                         "sessionId": session_id,
-                        "targetInfo": {
-                            "targetId": page_id,
-                            "type": "page",
-                            "title": page.title,
-                            "url": page.url_string(),
-                            "attached": true,
-                            "canAccessOpener": false,
-                            "browserContextId": page.context.id,
-                        },
+                        "targetInfo": crate::popup::target_info(ctx, page, true),
                         "waitingForDebugger": false,
                     }),
                 ));
@@ -189,15 +151,7 @@ pub async fn handle(
             if let Some(page) = ctx.get_page(target_id) {
                 let params = json!({
                     "sessionId": session_id,
-                    "targetInfo": {
-                        "targetId": target_id,
-                        "type": "page",
-                        "title": page.title,
-                        "url": page.url_string(),
-                        "attached": true,
-                        "canAccessOpener": false,
-                        "browserContextId": page.context.id,
-                    },
+                    "targetInfo": crate::popup::target_info(ctx, page, true),
                     "waitingForDebugger": false,
                 });
                 let event = match parent_session_id {
@@ -240,7 +194,19 @@ pub async fn handle(
             ctx.remove_page(target_id);
             Ok(json!({ "success": true }))
         }
-        "setAutoAttach" => Ok(json!({})),
+        "setAutoAttach" => {
+            let enabled = params.get("autoAttach").and_then(Value::as_bool).unwrap_or(false);
+            let wait_for_debugger = params.get("waitForDebuggerOnStart")
+                .and_then(Value::as_bool).unwrap_or(false);
+            ctx.auto_attach_options.insert(
+                parent_session_id.clone(),
+                crate::dispatch::AutoAttachOptions {
+                    enabled,
+                    wait_for_debugger: enabled && wait_for_debugger,
+                },
+            );
+            Ok(json!({}))
+        },
         "detachFromTarget" => {
             if let Some(session_id) = params.get("sessionId").and_then(Value::as_str) {
                 let page_id = ctx.sessions.remove(session_id);
@@ -315,15 +281,7 @@ pub async fn handle(
                 Some(id) => {
                     let page = ctx.get_page(id).ok_or("Target not found")?;
                     Ok(json!({
-                        "targetInfo": {
-                            "targetId": id,
-                            "type": "page",
-                            "title": page.title,
-                            "url": page.url_string(),
-                            "attached": true,
-                            "canAccessOpener": false,
-                            "browserContextId": page.context.id,
-                        }
+                        "targetInfo": crate::popup::target_info(ctx, page, true)
                     }))
                 }
                 None => {
