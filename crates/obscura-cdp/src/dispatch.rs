@@ -1395,6 +1395,39 @@ mod tests {
             "explicit GC must reclaim discarded objects: {before} -> {after}");
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn child_frame_is_advertised_with_default_runtime_context() {
+        let mut ctx = CdpContext::new();
+        let page_id = ctx.create_page();
+        let session = format!("{page_id}-context-test");
+        ctx.sessions.insert(session.clone(), page_id.clone());
+        ctx.runtime_enabled_sessions.insert(session.clone());
+        ctx.get_page_mut(&page_id).unwrap().resume_js();
+        {
+            let page = ctx.get_page_mut(&page_id).unwrap();
+            let frame = obscura_js::frame::FrameRealm::new(
+                page.js.as_mut().unwrap(), 1, 0,
+                "https://child.example/frame",
+                "<html><body><div id='in-frame'>child</div></body></html>",
+            ).unwrap();
+            page.frames.push(frame);
+        }
+        drain_frame_events(&mut ctx);
+        let context = ctx.contexts_for_page(&page_id)
+            .find(|record| record.is_default && record.frame_id.ends_with("-frame-1"))
+            .expect("child default context must be allocated");
+        assert_eq!(context.origin, "https://child.example/frame");
+        assert!(ctx.pending_events.iter().any(|event| {
+            event.method == "Runtime.executionContextCreated"
+                && event.session_id.as_deref() == Some(&session)
+                && event.params["context"]["id"] == context.id
+        }));
+        drain_frame_events(&mut ctx);
+        assert_eq!(ctx.contexts_for_page(&page_id)
+            .filter(|record| record.is_default && record.frame_id.ends_with("-frame-1"))
+            .count(), 1, "child default context must not be re-advertised on every command");
+    }
+
     #[tokio::test]
     async fn audits_enable_returns_empty_success() {
         let mut ctx = CdpContext::new();
