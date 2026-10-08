@@ -409,7 +409,7 @@ impl CdpContext {
         self.sessions.retain(|_, v| v != id);
     }
 
-    fn allocate_context(
+    pub(crate) fn allocate_context(
         &mut self,
         page_id: &str,
         frame_id: &str,
@@ -1198,6 +1198,7 @@ pub(crate) fn drain_frame_events(ctx: &mut CdpContext) {
     let mut events: Vec<CdpEvent> = Vec::new();
     let mut announced: HashMap<String, Vec<String>> = HashMap::new();
     let mut detached = Vec::new();
+    let mut added_frame_contexts = Vec::new();
     for page in &ctx.pages {
         let Some(session_ids) = page_to_sessions.get(&page.id) else {
             continue;
@@ -1214,6 +1215,11 @@ pub(crate) fn drain_frame_events(ctx: &mut CdpContext) {
             if known.is_some_and(|ids| ids.iter().any(|seen| seen == id)) {
                 continue;
             }
+            added_frame_contexts.push((
+                page.id.clone(),
+                id.to_string(),
+                frame["url"].as_str().unwrap_or("about:blank").to_string(),
+            ));
             for session_id in session_ids {
                 // Attach before navigate: a client builds its frame from the
                 // attach event and treats a navigation of a frame it has never
@@ -1249,6 +1255,24 @@ pub(crate) fn drain_frame_events(ctx: &mut CdpContext) {
             }
         }
         announced.insert(page.id.clone(), live_ids);
+    }
+    // Runtime.executionContextCreated for each child frame's default world is
+    // essential for Playwright's FrameExecutionContext/locator routing. A
+    // frameAttached/frameNavigated notification alone is not sufficient.
+    for (page_id, frame_id, origin) in added_frame_contexts {
+        if ctx.contexts_for_page(&page_id).any(|record| {
+            record.is_default && record.frame_id == frame_id
+        }) {
+            continue;
+        }
+        let record = ctx.allocate_context(
+            &page_id, &frame_id, &origin, "", true,
+        );
+        for session in ctx.runtime_sessions_for_page(&page_id) {
+            events.push(crate::domains::runtime::execution_context_created_event(
+                &record, Some(session),
+            ));
+        }
     }
     for (page_id, frame_id, page_sessions) in detached {
         let removed = ctx.remove_frame_contexts(&page_id, &frame_id);
