@@ -15515,6 +15515,7 @@ globalThis.Worker = class Worker {
     this._scope = null;
     this._pendingMessages = [];
     const worker = this;
+    this._url = String(url);
 
     let resolvedUrl = url;
     if (typeof url === 'string') {
@@ -15529,6 +15530,7 @@ globalThis.Worker = class Worker {
       if (!url.startsWith('http') && !url.startsWith('blob:') && !url.startsWith('data:')) {
         try { resolvedUrl = new URL(url, globalThis.location?.href || '').href; } catch(e) {}
       }
+      this._url = String(resolvedUrl);
       (async () => {
         try {
           const resp = await fetch(resolvedUrl);
@@ -15557,6 +15559,40 @@ globalThis.Worker = class Worker {
         scope._ev[type].push(fn);
       },
       close: () => { worker.terminate(); },
+      // Classic worker importScripts is synchronous. The in-memory blob and
+      // data-script paths work without a network round trip. Do not silently
+      // start an asynchronous fetch for HTTP URLs: doing so would execute the
+      // calling worker's next statement before its imported dependencies.
+      importScripts: (...urls) => {
+        for (const arg of urls) {
+          const input = String(arg);
+          const absolute = new URL(input, worker._url || globalThis.location.href).href;
+          let source = globalThis.__blobStore?.[absolute];
+          if (source === undefined && absolute.startsWith('data:')) {
+            const comma = absolute.indexOf(',');
+            if (comma < 0) throw new DOMException('Malformed data URL', 'NetworkError');
+            const meta = absolute.slice(5, comma);
+            const payload = absolute.slice(comma + 1);
+            if (/;base64$/i.test(meta)) {
+              const binary = atob(payload);
+              const bytes = Uint8Array.from(binary, ch => ch.charCodeAt(0));
+              source = new TextDecoder().decode(bytes);
+            } else {
+              source = decodeURIComponent(payload);
+            }
+          }
+          if (source === undefined) {
+            throw new DOMException(
+              'Synchronous network importScripts is not implemented for ' + absolute,
+              'NetworkError'
+            );
+          }
+          // Use the same worker scope as the parent classic script. Nested
+          // blob/data imports are evaluated before the caller resumes.
+          const execute = new Function('scope', 'source', 'with (scope) { eval(source); }');
+          execute.call(scope, scope, source);
+        }
+      },
       crypto: globalThis.crypto,
       Crypto: globalThis.Crypto,
       TextEncoder: globalThis.TextEncoder,
