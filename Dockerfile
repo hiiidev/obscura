@@ -3,9 +3,21 @@ FROM rust:1-slim-bookworm AS builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         ca-certificates \
+        git \
+        python3 \
         perl \
         make \
+        cmake \
+        clang \
+        libclang-dev \
+        llvm-dev \
+        pkg-config \
+        libssl-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# btls-sys/BoringSSL passes Clang-specific --target flags to C++ CMake tests.
+# Keep both C and C++ compilers on the same compatible toolchain.
+ENV CC=clang CXX=clang++
 
 WORKDIR /build
 
@@ -30,14 +42,14 @@ RUN for crate in obscura-dom obscura-net obscura-browser obscura-cdp obscura-js 
     echo "fn main() {}" > crates/obscura-cli/src/main.rs && \
     echo "fn main() {}" > crates/obscura-cli/src/worker.rs
 
-RUN cargo build --release --features render --bin obscura --bin obscura-worker 2>/dev/null || true
+RUN cargo build --release -p obscura-cli --features render,stealth --bin obscura --bin obscura-worker 2>/dev/null || true
 
 ARG OBSCURA_VERSION
 
 # Copy real sources and build
 COPY crates/ crates/
 RUN echo "Building Obscura version ${OBSCURA_VERSION:-from Cargo.toml}" && \
-    touch crates/*/src/*.rs && cargo build --release --features render --bin obscura --bin obscura-worker
+    touch crates/*/src/*.rs && OBSCURA_VERSION="${OBSCURA_VERSION}" cargo build --release -p obscura-cli --features render,stealth --bin obscura --bin obscura-worker
 
 # ---
 
