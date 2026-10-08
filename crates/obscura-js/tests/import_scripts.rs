@@ -58,7 +58,7 @@ async fn worker_imports_network_script_before_next_statement() {
         assert!(String::from_utf8_lossy(&request[..n]).starts_with("GET /lib.js "));
         let body = "self.imported = 42; self.order = ['imported'];";
         write!(stream,
-            "HTTP/1.1 200 OK\\r\\nContent-Type: application/javascript\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n{}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(), body).unwrap();
     });
     let mut js = ObscuraJsRuntime::new();
@@ -108,7 +108,7 @@ async fn network_imports_use_each_context_authenticated_proxy() {
             assert!(request.contains(&expected), "missing the expected proxy authorization");
             let body = format!("self.proxyIdentity = {value};");
             write!(stream,
-                "HTTP/1.1 200 OK\\r\\nContent-Type: application/javascript\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n{}",
+                "HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(), body,
             ).unwrap();
         });
@@ -134,4 +134,46 @@ async fn network_imports_use_each_context_authenticated_proxy() {
             serde_json::json!([value]));
         proxy_thread.join().unwrap();
     }
+}
+
+
+/// A proxy refusal must surface an error, never retry the unresolved host
+/// directly. The .invalid TLD makes a direct fallback observable as failure.
+#[tokio::test(flavor = "current_thread")]
+async fn network_import_rejects_proxy_407_without_direct_fallback() {
+    use std::io::{Read, Write};
+    use std::sync::Arc;
+    let proxy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = proxy.local_addr().unwrap();
+    let proxy_thread = std::thread::spawn(move || {
+        let (mut stream, _) = proxy.accept().unwrap();
+        let mut request = [0u8; 4096];
+        let n = stream.read(&mut request).unwrap();
+        assert!(String::from_utf8_lossy(&request[..n])
+            .starts_with("GET http://example.invalid/refused.js "));
+        stream.write_all(
+            b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        ).unwrap();
+    });
+    let client = Arc::new(obscura_net::ObscuraHttpClient::with_full_options(
+        Arc::new(obscura_net::CookieJar::new()),
+        Some(&format!("http://{address}")),
+        true,
+    ));
+    let mut js = ObscuraJsRuntime::new();
+    js.set_url("https://example.com/parent.html");
+    js.set_http_client(client);
+    js.run_page_init();
+    js.execute_script("worker-proxy-refused", r#"
+        globalThis.__proxyFailures = [];
+        const code = 'importScripts("http://example.invalid/refused.js"); postMessage("unexpected");';
+        const workerUrl = URL.createObjectURL(new Blob([code], {type: 'text/javascript'}));
+        const worker = new Worker(workerUrl);
+        worker.onerror = error => { __proxyFailures.push(error.name); worker.terminate(); };
+        worker.onmessage = event => { __proxyFailures.push(event.data); worker.terminate(); };
+    "#).unwrap();
+    js.run_event_loop_bounded(250).await.unwrap();
+    assert_eq!(js.evaluate("__proxyFailures").unwrap(),
+        serde_json::json!(["NetworkError"]));
+    proxy_thread.join().unwrap();
 }
