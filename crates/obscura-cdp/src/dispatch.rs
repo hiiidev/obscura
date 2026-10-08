@@ -332,6 +332,29 @@ impl CdpContext {
         Ok(page_ids)
     }
 
+    /// Keep TargetInfo consistent across discovery, lookup and attach events.
+    pub(crate) fn target_info(&self, page: &Page, attached: bool) -> serde_json::Value {
+        let mut info = json!({
+            "targetId": page.id,
+            "type": "page",
+            "title": page.title,
+            "url": page.url_string(),
+            "attached": attached,
+            "canAccessOpener": false,
+            "browserContextId": page.context.id,
+        });
+        if let Some(popup) = self.popup_targets.get(&page.id) {
+            if let Some(opener) = &popup.opener_id {
+                info["openerId"] = json!(opener);
+                info["canAccessOpener"] = json!(true);
+            }
+            if let Some(frame) = &popup.opener_frame_id {
+                info["openerFrameId"] = json!(frame);
+            }
+        }
+        info
+    }
+
     pub fn get_page(&self, id: &str) -> Option<&Page> {
         self.pages.iter().find(|p| p.id == id)
     }
@@ -944,7 +967,7 @@ pub(crate) fn drain_popup_requests(ctx: &mut CdpContext) {
         for session in source_sessions {
             ctx.pending_events.push(CdpEvent::with_session(
                 "Page.windowOpen",
-                json!({"url": popup.url, "windowName": "_blank",
+                json!({"url": popup.url.clone(), "windowName": "_blank",
                        "windowFeatures": [], "userGesture": false}),
                 session,
             ));
