@@ -1518,6 +1518,66 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn window_open_allocates_real_page_in_source_context_and_tracks_close() {
+        let mut ctx = CdpContext::new();
+        let context_id = ctx.create_browser_context_with_proxy(
+            Some("http://test-user:test-password@127.0.0.1:18280".into())
+        );
+        let source = ctx.create_page_in_context(Some(&context_id)).unwrap();
+        ctx.get_page_mut(&source).unwrap().resume_js();
+        let session = format!("{source}-session");
+        ctx.sessions.insert(session.clone(), source.clone());
+
+        let evaluate = |id, expression: &str| CdpRequest {
+            id, method: "Runtime.evaluate".into(),
+            params: json!({"expression":expression, "returnByValue":true}),
+            session_id: Some(session.clone()),
+        };
+        let response = dispatch(&evaluate(1,
+            "globalThis.testPopup = window.open('about:blank', '_blank'); !!testPopup && !testPopup.closed"),
+            &mut ctx).await;
+        assert!(response.error.is_none(), "{:?}", response.error);
+        assert_eq!(ctx.pages.len(), 2, "window.open must allocate a real target");
+        let popup = ctx.pages.iter().find(|p| p.id != source).unwrap();
+        assert_eq!(popup.context.id, context_id);
+        assert!(popup.context.effective_proxy_url().unwrap().contains("test-user"));
+        let popup_id = popup.id.clone();
+        let info = &ctx.popup_targets[&popup_id];
+        assert_eq!(info.opener_id.as_deref(), Some(source.as_str()));
+        assert_eq!(info.opener_frame_id.as_deref(), Some(source.as_str()));
+        assert!(ctx.pending_events.iter().any(|e| e.method == "Page.windowOpen"));
+        assert!(ctx.pending_events.iter().any(|e|
+            e.method == "Target.targetCreated" &&
+            e.params["targetInfo"]["openerId"] == source));
+        let response = dispatch(&evaluate(2, "testPopup.close(); testPopup.closed"),
+            &mut ctx).await;
+        assert!(response.error.is_none(), "{:?}", response.error);
+        assert!(ctx.get_page(&popup_id).is_none());
+        assert_eq!(ctx.pages.len(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn noopener_returns_null_but_still_creates_target_without_opener() {
+        let mut ctx = CdpContext::new();
+        let source = ctx.create_page();
+        ctx.get_page_mut(&source).unwrap().resume_js();
+        let session = format!("{source}-session");
+        ctx.sessions.insert(session.clone(), source);
+        let response = dispatch(&CdpRequest {
+            id: 1, method: "Runtime.evaluate".into(),
+            params: json!({"expression":
+                "window.open('about:blank', '_blank', 'noopener') === null",
+                "returnByValue":true}),
+            session_id: Some(session),
+        }, &mut ctx).await;
+        assert!(response.error.is_none(), "{:?}", response.error);
+        assert_eq!(response.result.unwrap()["result"]["value"], true);
+        assert_eq!(ctx.pages.len(), 2);
+        let popup = ctx.pages.last().unwrap();
+        assert!(ctx.popup_targets[&popup.id].opener_id.is_none());
+    }
+
     #[tokio::test]
     async fn send_message_to_target_rejects_invalid_message() {
         let mut ctx = CdpContext::new();
