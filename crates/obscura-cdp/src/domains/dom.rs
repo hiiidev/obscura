@@ -16,6 +16,9 @@ fn resolve_node_id(page: &mut Page, params: &Value) -> Result<u64, String> {
         return Ok(nid);
     }
     if let Some(oid) = params.get("objectId").and_then(|v| v.as_str()) {
+        if oid.starts_with("frame:") {
+            return Err("Child frame backend node operations require frame-qualified DOM node IDs".into());
+        }
         let code = format!(
             "(function() {{ var o = globalThis.__obscura_objects && globalThis.__obscura_objects[{}]; \
              return (o && typeof o._nid === 'number') ? o._nid : -1; }})()",
@@ -140,6 +143,19 @@ pub async fn handle(
             {
                 nid
             } else if let Some(oid) = params.get("objectId").and_then(|v| v.as_str()) {
+                if oid.starts_with("frame:") {
+                    // Frame backing node IDs are local to that document. Never
+                    // accidentally reinterpret them against the parent's DOM.
+                    let literal = crate::util::object_id_literal(oid);
+                    let code = format!(
+                        "(() => {{ const n = globalThis.__obscura_objects?.[{literal}];                          if (!n || typeof n.nodeType !== 'number') return null;                          return {{nodeType:n.nodeType,nodeName:n.nodeName || '',                          localName:n.localName || '',nodeValue:n.nodeValue || '',                          childNodeCount:n.childNodes?.length || 0}}; }})()"
+                    );
+                    let node = page.evaluate_frame_object_for_cdp(oid, &code)?;
+                    if node.is_null() {
+                        return Err(format!("Child frame objectId {oid} is not a node"));
+                    }
+                    return Ok(json!({"node":node}));
+                }
                 let code = format!(
                     "(function() {{ var o = globalThis.__obscura_objects[{}]; if (!o) return -1; return (typeof o._nid === 'number') ? o._nid : -1; }})()",
                     crate::util::object_id_literal(oid)
@@ -533,6 +549,29 @@ mod tests {
     // A stale/invalid objectId resolves to -1 in JS. describeNode/resolveNode
     // must surface an error, not cast -1 to nodeId 0 (the document root) and
     // return the wrong node. See #917.
+    #[tokio::test(flavor = "current_thread")]
+    async fn describe_child_frame_node_does_not_read_parent_dom() {
+        let mut ctx = CdpContext::new();
+        let page_id = ctx.create_page();
+        let session = Some("frame-node-test".to_string());
+        ctx.sessions.insert(session.clone().unwrap(), page_id.clone());
+        let page = ctx.get_page_mut(&page_id).unwrap();
+        page.resume_js();
+        let frame = obscura_js::frame::FrameRealm::new(
+            page.js.as_mut().unwrap(), 1, 0, "https://child.example/test",
+            "<html><body><input id='from-child'></body></html>",
+        ).unwrap();
+        page.frames.push(frame);
+        let value = page.evaluate_child_frame_for_cdp(
+            1, "document.querySelector('#from-child')", false,
+        ).unwrap();
+        let oid = value["objectId"].as_str().unwrap();
+        let node = handle("describeNode", &json!({"objectId":oid}),
+            &mut ctx, &session).await.unwrap();
+        assert_eq!(node["node"]["nodeName"], "INPUT");
+        assert_eq!(node["node"]["nodeType"], 1);
+    }
+
     #[tokio::test]
     async fn describe_node_errors_on_unresolvable_object_id() {
         let mut ctx = CdpContext::new();
