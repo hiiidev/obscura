@@ -4906,6 +4906,40 @@ impl Page {
         frame.evaluate(runtime, &expr)
     }
 
+    /// Execute a read-only CDP object inspection in the correct V8 FrameRealm.
+    /// The frame-qualified objectId is not present in the parent page registry.
+    pub fn evaluate_frame_object_for_cdp(
+        &mut self,
+        object_id: &str,
+        expression: &str,
+    ) -> Result<serde_json::Value, String> {
+        let frame_id = object_id.strip_prefix("frame:")
+            .and_then(|rest| rest.split(':').next())
+            .and_then(|id| id.parse::<u32>().ok())
+            .ok_or("Not a child frame objectId")?;
+        self.evaluate_in_child_frame(frame_id, expression)
+    }
+
+    /// Await Runtime.evaluate Promise results without crossing back into the
+    /// page's default JS realm. Reuse callFunctionOn's bounded frame pump.
+    pub async fn evaluate_child_frame_promise_for_cdp(
+        &mut self,
+        frame_id: u32,
+        expression: &str,
+        return_by_value: bool,
+        timeout_ms: u64,
+    ) -> Result<serde_json::Value, String> {
+        self.call_function_in_child_frame_for_cdp(
+            frame_id,
+            &format!("function() {{ return ({expression}); }}"),
+            None,
+            &[],
+            return_by_value,
+            true,
+            timeout_ms,
+        ).await
+    }
+
     /// Frame-owned callFunctionOn for Playwright's non-awaiting locator
     /// bootstrap. The return handle is retained in that frame, not the page.
     pub async fn call_function_in_child_frame_for_cdp(
