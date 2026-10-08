@@ -4908,13 +4908,15 @@ impl Page {
 
     /// Frame-owned callFunctionOn for Playwright's non-awaiting locator
     /// bootstrap. The return handle is retained in that frame, not the page.
-    pub fn call_function_in_child_frame_for_cdp(
+    pub async fn call_function_in_child_frame_for_cdp(
         &mut self,
         frame_id: u32,
         declaration: &str,
         object_id: Option<&str>,
         arguments: &[serde_json::Value],
         return_by_value: bool,
+        await_promise: bool,
+        timeout_ms: u64,
     ) -> Result<serde_json::Value, String> {
         let this_object = object_id.map(|id| {
             format!("globalThis.__obscura_objects[{}]", serde_json::to_string(id).unwrap())
@@ -4936,7 +4938,50 @@ impl Page {
         let expression = format!(
             "({declaration}).apply({this_object}, [{args}])",
         );
-        self.evaluate_child_frame_for_cdp(frame_id, &expression, return_by_value)
+        if !await_promise {
+            return self.evaluate_child_frame_for_cdp(frame_id, &expression, return_by_value);
+        }
+        static NEXT_AWAIT: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
+        let id = NEXT_AWAIT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let slot = serde_json::to_string(&format!("childAwait-{id}")).unwrap();
+        let start = format!(
+            "(() => {{                globalThis.__obscura_child_pending ??= Object.create(null);                const slot = globalThis.__obscura_child_pending[{slot}] = {{done: false}};                try {{                    Promise.resolve({expression}).then(                        v => {{ slot.done = true; slot.value = v; }},                        e => {{ slot.done = true; slot.error = String(e); }}                    );                }} catch(e) {{ slot.done = true; slot.error = String(e); }}                return true;            }})()",
+        );
+        let done = format!(
+            "globalThis.__obscura_child_pending?.[{slot}]?.done === true",
+        );
+        {
+            let frame = self.frames.iter()
+                .find(|frame| frame.frame_id() == frame_id)
+                .ok_or_else(|| format!("Frame {frame_id} is no longer attached"))?;
+            let runtime = self.js.as_mut().ok_or("No JavaScript runtime")?;
+            frame.evaluate(runtime, &start)?;
+            let settled = runtime.resolve_promises_until(|rt| {
+                frame.evaluate(rt, &done).ok().and_then(|v| v.as_bool()).unwrap_or(false)
+            }, timeout_ms).await;
+            if !settled {
+                return Err(format!(
+                    "Child frame Runtime.callFunctionOn promise did not settle within {timeout_ms}ms"
+                ));
+            }
+            let err = format!("globalThis.__obscura_child_pending[{slot}].error ?? null");
+            if let Some(error) = frame.evaluate(runtime, &err)?.as_str() {
+                return Err(format!("Child frame function rejected: {error}"));
+            }
+        }
+        let result = self.evaluate_child_frame_for_cdp(
+            frame_id, &format!("globalThis.__obscura_child_pending[{slot}].value"),
+            return_by_value,
+        );
+        if let (Some(frame), Some(runtime)) = (
+            self.frames.iter().find(|frame| frame.frame_id() == frame_id),
+            self.js.as_mut(),
+        ) {
+            let _ = frame.evaluate(runtime,
+                &format!("delete globalThis.__obscura_child_pending[{slot}]"));
+        }
+        result
     }
 
     pub fn has_js(&self) -> bool {
