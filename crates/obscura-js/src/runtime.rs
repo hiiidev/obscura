@@ -1281,6 +1281,17 @@ impl ObscuraJsRuntime {
         self.state.borrow_mut().pending_navigation.take()
     }
 
+    /// Drain host-owned window actions at a JavaScript task boundary.
+    pub fn take_pending_window_actions(&self) -> Vec<crate::ops::WindowAction> {
+        self.state.borrow_mut().pending_window_actions.drain(..).collect()
+    }
+
+    /// Target.closeTarget and BrowserContext disposal update observable
+    /// WindowProxy.closed on the source page without entering V8.
+    pub fn mark_window_closed(&self, handle: u32) {
+        self.state.borrow_mut().closed_window_handles.insert(handle);
+    }
+
     /// Session history index that accompanies the pending navigation when
     /// page script traversed to another document with `history.go()`.
     pub fn take_pending_history_traversal(&self) -> Option<usize> {
