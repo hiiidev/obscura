@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use obscura_browser::{BrowserContext, Page};
@@ -48,6 +48,12 @@ pub(crate) struct ExecutionContextRecord {
     pub is_default: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct AutoAttachOptions {
+    pub enabled: bool,
+    pub wait_for_debugger: bool,
+}
+
 pub struct CdpContext {
     pub pages: Vec<Page>,
     pub sessions: HashMap<String, String>, // session_id -> page_id
@@ -64,6 +70,11 @@ pub struct CdpContext {
     /// is announced once and a frame that goes away can be retracted.
     pub announced_frames: HashMap<String, Vec<String>>,
     pub pending_events: Vec<CdpEvent>,
+    /// (source target, opaque window handle) -> actual child target.
+    pub(crate) popup_targets: HashMap<(String, u32), String>,
+    pub(crate) popup_nav_queue: VecDeque<(String, String)>, // session, absolute URL
+    pub(crate) popup_paused: HashMap<String, (String, String)>, // session -> (target, URL)
+    pub(crate) auto_attach_options: HashMap<Option<String>, AutoAttachOptions>,
     #[cfg(feature = "render")]
     pub(crate) screencasts: HashMap<String, ScreencastState>,
     #[cfg(feature = "render")]
@@ -178,6 +189,10 @@ impl CdpContext {
             nav_events_emitted: std::collections::HashSet::new(),
             announced_frames: HashMap::new(),
             pending_events: Vec::new(),
+            popup_targets: HashMap::new(),
+            popup_nav_queue: VecDeque::new(),
+            popup_paused: HashMap::new(),
+            auto_attach_options: HashMap::new(),
             #[cfg(feature = "render")]
             screencasts: HashMap::new(),
             #[cfg(feature = "render")]
@@ -339,6 +354,18 @@ impl CdpContext {
     }
 
     pub fn remove_page(&mut self, id: &str) {
+        // Closing the target also closes every WindowProxy that points at it.
+        let removed_handles: Vec<(String, u32)> = self.popup_targets.iter()
+            .filter_map(|(key, target)| (target == id).then_some(key.clone()))
+            .collect();
+        for (source, handle) in removed_handles {
+            if let Some(page) = self.get_page(&source) {
+                page.mark_window_closed(handle);
+            }
+            self.popup_targets.remove(&(source, handle));
+        }
+        self.popup_nav_queue.retain(|(sid, _)| self.sessions.get(sid).is_some_and(|target| target != id));
+        self.popup_paused.retain(|_, (target, _)| target != id);
         let removed_sessions: Vec<String> = self
             .sessions
             .iter()
@@ -859,6 +886,7 @@ pub async fn dispatch(req: &CdpRequest, ctx: &mut CdpContext) -> CdpResponse {
     drain_runtime_events(ctx);
     drain_binding_calls(ctx);
     drain_frame_events(ctx);
+    crate::popup::drain_window_actions(ctx);
 
     match result {
         Ok(value) => CdpResponse::success(req.id, value, req.session_id.clone()),
