@@ -149,6 +149,15 @@ impl NavigationTiming {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct PopupRequest {
+    pub handle: String,
+    pub url: String,
+    pub frame_id: u32,
+    pub no_opener: bool,
+    pub closed: Arc<std::sync::atomic::AtomicBool>,
+}
+
 pub struct ObscuraState {
     pub dom: Option<DomTree>,
     pub url: String,
@@ -178,6 +187,11 @@ pub struct ObscuraState {
     #[cfg(feature = "stealth")]
     pub stealth_client: Option<Arc<StealthHttpClient>>,
     pub pending_navigation: Option<(String, String, String)>,
+    /// Browser-owned window.open reservations. The JS op queues synchronously;
+    /// the CDP host creates real targets after V8 yields, in the source Context.
+    pub pending_popups: VecDeque<PopupRequest>,
+    pub popup_closed_handles: HashMap<String, Arc<std::sync::atomic::AtomicBool>>,
+    pub pending_popup_closes: Vec<String>,
     /// The tab's session history as the owning page sees it: entry URLs, the
     /// index of this document's first entry, and the current index. Empty
     /// for frames and for runtimes outside a page, where `history` only
@@ -433,6 +447,9 @@ impl ObscuraState {
             #[cfg(feature = "stealth")]
             stealth_client: None,
             pending_navigation: None,
+            pending_popups: VecDeque::new(),
+            popup_closed_handles: HashMap::new(),
+            pending_popup_closes: Vec::new(),
             session_history: SessionHistory::default(),
             pending_history_traversal: None,
             intercept_tx: None,
@@ -5685,6 +5702,61 @@ fn op_history_traverse(scope: &mut v8::PinScope, state: &OpState, index: u32) ->
     true
 }
 
+/// Reserve a popup synchronously; never fabricate its BrowserContext from
+/// page-controlled parameters. The CDP host derives Context from the opener.
+#[op2]
+#[string]
+fn op_window_open(
+    scope: &mut v8::PinScope,
+    state: &OpState,
+    #[string] url: &str,
+    no_opener: bool,
+) -> String {
+    static NEXT_HANDLE: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(1);
+    let frame_id = realm_state(scope, state).borrow().frame_id;
+    let shared = state.borrow::<SharedState>().clone();
+    let mut page = shared.borrow_mut();
+    if page.pending_popups.len() >= 32 {
+        return String::new();
+    }
+    let handle = format!(
+        "popup-handle-{}",
+        NEXT_HANDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    page.popup_closed_handles.insert(handle.clone(), closed.clone());
+    page.pending_popups.push_back(PopupRequest {
+        handle: handle.clone(),
+        url: url.to_string(),
+        frame_id,
+        no_opener,
+        closed,
+    });
+    handle
+}
+
+#[op2(fast)]
+fn op_popup_closed(state: &OpState, #[string] handle: &str) -> bool {
+    let shared = state.borrow::<SharedState>().clone();
+    let page = shared.borrow();
+    page.popup_closed_handles.get(handle).is_none_or(|closed| {
+        closed.load(std::sync::atomic::Ordering::Acquire)
+    })
+}
+
+#[op2(fast)]
+fn op_popup_close(state: &OpState, #[string] handle: &str) {
+    let shared = state.borrow::<SharedState>().clone();
+    let mut page = shared.borrow_mut();
+    if let Some(closed) = page.popup_closed_handles.get(handle) {
+        if closed.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            return;
+        }
+        page.pending_popup_closes.push(handle.to_string());
+    }
+}
+
 // A frame that navigates itself must not move the top document. Recording the
 // navigation against the calling realm keeps it inside that frame.
 #[op2(fast)]
@@ -6883,6 +6955,9 @@ pub fn build_extension() -> Extension {
         op_get_cookies(),
         op_set_cookie(),
         op_navigate(),
+        op_window_open(),
+        op_popup_closed(),
+        op_popup_close(),
         op_session_history(),
         op_history_traverse(),
         op_frame_document_ready(),
