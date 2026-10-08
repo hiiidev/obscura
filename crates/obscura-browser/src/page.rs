@@ -4881,6 +4881,64 @@ impl Page {
         frame.evaluate(runtime, expression)
     }
 
+    /// CDP remote object metadata backed by a real child frame's V8 global.
+    /// Object handles are frame-qualified, never aliases to top-level nodes.
+    pub fn evaluate_child_frame_for_cdp(
+        &mut self,
+        frame_id: u32,
+        expression: &str,
+        return_by_value: bool,
+    ) -> Result<serde_json::Value, String> {
+        static NEXT_OBJECT: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
+        let id = format!("frame:{frame_id}:{}", NEXT_OBJECT.fetch_add(
+            1, std::sync::atomic::Ordering::Relaxed,
+        ));
+        let expr = format!(
+            "(function() {{                const v = ({expression});                const t = typeof v;                const meta = {{type: t}};                if (v === null) {{ meta.type = 'object'; meta.subtype = 'null'; meta.value = null; }}                else if (t === 'undefined') {{ meta.type = 'undefined'; }}                else if (t === 'number' && !Number.isFinite(v)) {{                    meta.unserializableValue = String(v);                }}                else if (t === 'object' || t === 'function') {{                    if ({return_by_value}) {{                        meta.value = JSON.parse(JSON.stringify(v));                    }} else {{                        globalThis.__obscura_objects[{object_id}] = v;                        meta.objectId = {object_id};                        meta.className = v?.constructor?.name || 'Object';                        meta.description = meta.className;                        if (v && typeof v.nodeType === 'number') meta.subtype = 'node';                        else if (Array.isArray(v)) meta.subtype = 'array';                    }}                }} else {{ meta.value = v; }}                return meta;            }})()",
+            return_by_value = if return_by_value { "true" } else { "false" },
+            object_id = serde_json::to_string(&id).unwrap(),
+        );
+        let frame = self.frames.iter()
+            .find(|frame| frame.frame_id() == frame_id)
+            .ok_or_else(|| format!("Frame {frame_id} is no longer attached"))?;
+        let runtime = self.js.as_mut().ok_or("No JavaScript runtime")?;
+        frame.evaluate(runtime, &expr)
+    }
+
+    /// Frame-owned callFunctionOn for Playwright's non-awaiting locator
+    /// bootstrap. The return handle is retained in that frame, not the page.
+    pub fn call_function_in_child_frame_for_cdp(
+        &mut self,
+        frame_id: u32,
+        declaration: &str,
+        object_id: Option<&str>,
+        arguments: &[serde_json::Value],
+        return_by_value: bool,
+    ) -> Result<serde_json::Value, String> {
+        let this_object = object_id.map(|id| {
+            format!("globalThis.__obscura_objects[{}]", serde_json::to_string(id).unwrap())
+        }).unwrap_or_else(|| "globalThis".into());
+        let args = arguments.iter().map(|arg| {
+            if let Some(oid) = arg.get("objectId").and_then(|v| v.as_str()) {
+                format!("globalThis.__obscura_objects[{}]", serde_json::to_string(oid).unwrap())
+            } else if let Some(value) = arg.get("value") {
+                value.to_string()
+            } else {
+                match arg.get("unserializableValue").and_then(|v| v.as_str()) {
+                    Some("NaN") => "NaN".to_string(),
+                    Some("Infinity") => "Infinity".to_string(),
+                    Some("-Infinity") => "-Infinity".to_string(),
+                    _ => "undefined".to_string(),
+                }
+            }
+        }).collect::<Vec<_>>().join(",");
+        let expression = format!(
+            "({declaration}).apply({this_object}, [{args}])",
+        );
+        self.evaluate_child_frame_for_cdp(frame_id, &expression, return_by_value)
+    }
+
     pub fn has_js(&self) -> bool {
         self.js.is_some()
     }
