@@ -419,6 +419,93 @@ mod tests {
         assert_eq!(parsed.password(), Some("secret"));
     }
 
+    // Regression: CLI --features stealth must enable this crate's stealth
+    // feature, otherwise continueWithAuth stores credentials but leaves pages
+    // using their original unauthenticated wreq clients.
+    #[cfg(feature = "stealth")]
+    #[tokio::test]
+    async fn stealth_proxy_credentials_refresh_existing_pages() {
+        use std::sync::Arc;
+
+        let context = Arc::new(obscura_browser::BrowserContext::with_options(
+            "proxy-auth-stealth".to_string(),
+            Some("http://proxy.example:8080".to_string()),
+            true,
+        ));
+        let mut ctx = CdpContext::new_with_shared_context(context.clone());
+        let target_id = ctx.create_page();
+        let sibling_id = ctx.create_page();
+        let isolated_id = ctx.create_browser_context_with_proxy(Some(
+            "http://isolated-proxy.example:9090".to_string(),
+        ));
+        let isolated_page_id = ctx
+            .create_page_in_context(Some(&isolated_id))
+            .expect("isolated context page");
+        let session = Some("proxy-stealth-session".to_string());
+        ctx.sessions.insert(session.clone().unwrap(), target_id.clone());
+
+        let client_for = |ctx: &CdpContext, id: &str| {
+            ctx.pages
+                .iter()
+                .find(|page| page.id == id)
+                .and_then(|page| page.stealth_client.clone())
+                .expect("stealth page client")
+        };
+        let before_target = client_for(&ctx, &target_id);
+        let before_sibling = client_for(&ctx, &sibling_id);
+        let before_isolated = client_for(&ctx, &isolated_page_id);
+
+        handle(
+            "enable",
+            &json!({"patterns": [], "handleAuthRequests": true}),
+            &mut ctx,
+            &session,
+        )
+        .await
+        .expect("Fetch.enable should emit proxy challenge");
+        let request_id = ctx
+            .pending_events
+            .iter()
+            .find(|event| event.method == "Fetch.authRequired")
+            .and_then(|event| event.params["requestId"].as_str())
+            .expect("proxy auth request ID")
+            .to_string();
+
+        handle(
+            "continueWithAuth",
+            &json!({
+                "requestId": request_id,
+                "authChallengeResponse": {
+                    "response": "ProvideCredentials",
+                    "username": "alice",
+                    "password": "secret"
+                }
+            }),
+            &mut ctx,
+            &session,
+        )
+        .await
+        .expect("Fetch.continueWithAuth should install proxy credentials");
+
+        let effective = context.effective_proxy_url().expect("proxy URL");
+        let parsed = url::Url::parse(&effective).expect("valid proxy URL");
+        assert_eq!(parsed.username(), "alice");
+        assert_eq!(parsed.password(), Some("secret"));
+
+        assert!(
+            !Arc::ptr_eq(&before_target, &client_for(&ctx, &target_id)),
+            "target page must rebuild its stealth client after authentication"
+        );
+        assert!(
+            !Arc::ptr_eq(&before_sibling, &client_for(&ctx, &sibling_id)),
+            "other existing pages in the same context must also refresh"
+        );
+        assert!(
+            Arc::ptr_eq(&before_isolated, &client_for(&ctx, &isolated_page_id)),
+            "a separate context's transport must remain unchanged"
+        );
+    }
+
     // Parity with server.rs handle_fetch_resolution: continueRequest must
     // forward the client's header overrides (route.continue({ headers })), not
     // drop them. See #919.
