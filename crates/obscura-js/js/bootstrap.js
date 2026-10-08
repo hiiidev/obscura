@@ -15754,7 +15754,28 @@ globalThis.print = function() {}; _markNative(globalThis.print);
 globalThis.alert = function() {}; _markNative(globalThis.alert);
 globalThis.confirm = function() { return true; }; _markNative(globalThis.confirm);
 globalThis.prompt = function() { return null; }; _markNative(globalThis.prompt);
-globalThis.open = function() { return null; }; _markNative(globalThis.open);
+// window.open must return synchronously while the browser host owns target
+// allocation. A reservation is backed by a real Target after this V8 task
+// yields; it is not a simulated page or an asynchronous Promise.
+globalThis.open = function(url = '', target = '_blank', features = '') {
+  const raw = String(url);
+  let resolved = 'about:blank';
+  if (raw) {
+    resolved = new URL(raw, globalThis.document?.baseURI || globalThis.location?.href || 'about:blank').href;
+  }
+  const options = String(features).split(',').map(s => s.trim().toLowerCase());
+  const noOpener = options.some(s => /^(noopener|noreferrer)(?:=(?:yes|true|1))?$/.test(s));
+  const handle = __obscuraCore.ops.op_window_open(resolved, noOpener);
+  if (!handle || noOpener) return null;
+  const proxy = {
+    get closed() { return __obscuraCore.ops.op_popup_closed(handle); },
+    close() { __obscuraCore.ops.op_popup_close(handle); },
+    get opener() { return globalThis; },
+    focus() {},
+    blur() {},
+  };
+  return proxy;
+}; _markNative(globalThis.open);
 globalThis.close = function() {}; _markNative(globalThis.close);
 globalThis.stop = function() {}; _markNative(globalThis.stop);
 // `window.postMessage` targets this same window. It was a no-op, so a page
