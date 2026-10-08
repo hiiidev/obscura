@@ -15559,10 +15559,8 @@ globalThis.Worker = class Worker {
         scope._ev[type].push(fn);
       },
       close: () => { worker.terminate(); },
-      // Classic worker importScripts is synchronous. The in-memory blob and
-      // data-script paths work without a network round trip. Do not silently
-      // start an asynchronous fetch for HTTP URLs: doing so would execute the
-      // calling worker's next statement before its imported dependencies.
+      // Classic worker imports execute synchronously. Blob/data sources come
+      // from memory; HTTP(S) goes through the owning BrowserContext transport.
       importScripts: (...urls) => {
         for (const arg of urls) {
           const input = String(arg);
@@ -15581,11 +15579,20 @@ globalThis.Worker = class Worker {
               source = decodeURIComponent(payload);
             }
           }
+          if (source === undefined && /^https?:$/i.test(new URL(absolute).protocol)) {
+            // This op waits for the browser-owned Context transport; the
+            // next statement in the worker runs only after this script loads
+            // and executes. Never use page fetch() here: it is asynchronous.
+            try {
+              source = __obscuraCore.ops.op_worker_import_script(
+                absolute, worker._url || globalThis.location.href
+              );
+            } catch (error) {
+              throw new DOMException(String(error), 'NetworkError');
+            }
+          }
           if (source === undefined) {
-            throw new DOMException(
-              'Synchronous network importScripts is not implemented for ' + absolute,
-              'NetworkError'
-            );
+            throw new DOMException('Unable to load worker script ' + absolute, 'NetworkError');
           }
           // Use the same worker scope as the parent classic script. Nested
           // blob/data imports are evaluated before the caller resumes.

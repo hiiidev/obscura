@@ -5702,6 +5702,76 @@ fn op_history_traverse(scope: &mut v8::PinScope, state: &OpState, index: u32) ->
     true
 }
 
+/// Classic WorkerGlobalScope.importScripts is synchronous by specification.
+/// The browser-owned transport executes in a dedicated thread: no nested
+/// tokio::Handle::block_on inside V8's current-thread event loop. This uses
+/// exactly the owning page's context-scoped HTTP client (including credentials
+/// installed through Fetch.continueWithAuth); there is no direct fallback.
+#[op2]
+#[string]
+fn op_worker_import_script(
+    state: &OpState,
+    #[string] url: &str,
+    #[string] importer: &str,
+) -> Result<String, deno_error::JsErrorBox> {
+    let shared = state.borrow::<SharedState>().clone();
+    let (client, initiator, blocked) = {
+        let page = shared.borrow();
+        let client = page.http_client.clone().ok_or_else(|| {
+            deno_error::JsErrorBox::generic("Worker importScripts requires a page HTTP client")
+        })?;
+        let initiator = url::Url::parse(&page.url)
+            .map_err(|err| deno_error::JsErrorBox::generic(err.to_string()))?;
+        let blocked = page.blocked_urls.iter().any(|pattern| {
+            pattern == "*" || url.contains(pattern) || glob_match(pattern, url)
+        });
+        (client, initiator, blocked)
+    };
+    if blocked {
+        return Err(deno_error::JsErrorBox::generic("Worker script URL is blocked"));
+    }
+    let target = url::Url::parse(url)
+        .map_err(|err| deno_error::JsErrorBox::generic(err.to_string()))?;
+    if !matches!(target.scheme(), "http" | "https") {
+        return Err(deno_error::JsErrorBox::generic("Unsupported worker script URL scheme"));
+    }
+    // Reuse the scripted-fetch SSRF/private-network policy before any transport.
+    validate_fetch_url(&target, client.allow_private_network)
+        .map_err(deno_error::JsErrorBox::generic)?;
+    let importer = url::Url::parse(importer).ok()
+        .filter(|url| matches!(url.scheme(), "http" | "https"));
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("obscura-worker-import".into())
+        .spawn(move || {
+            let result = (|| -> Result<String, String> {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all().build().map_err(|e| e.to_string())?;
+                runtime.block_on(async move {
+                    let mut request = obscura_net::ResourceRequest::subresource(
+                        ResourceType::Script, &initiator,
+                    );
+                    request.referrer = importer.or_else(|| Some(initiator));
+                    request.max_response_bytes = 8 * 1024 * 1024;
+                    let response = tokio::time::timeout(
+                        std::time::Duration::from_secs(20),
+                        client.fetch_resource_with_callbacks(&target, request, None),
+                    ).await.map_err(|_| "Worker script fetch timed out".to_string())?
+                        .map_err(|err| err.to_string())?;
+                    if !(200..300).contains(&response.status) {
+                        return Err(format!("Worker script fetch returned HTTP {}", response.status));
+                    }
+                    Ok(response.text())
+                })
+            })();
+            let _ = sender.send(result);
+        })
+        .map_err(|err| deno_error::JsErrorBox::generic(err.to_string()))?;
+    receiver.recv_timeout(std::time::Duration::from_secs(22))
+        .map_err(|_| deno_error::JsErrorBox::generic("Worker script import timed out"))?
+        .map_err(deno_error::JsErrorBox::generic)
+}
+
 /// Reserve a popup synchronously; never fabricate its BrowserContext from
 /// page-controlled parameters. The CDP host derives Context from the opener.
 #[op2]
@@ -6955,6 +7025,7 @@ pub fn build_extension() -> Extension {
         op_get_cookies(),
         op_set_cookie(),
         op_navigate(),
+        op_worker_import_script(),
         op_window_open(),
         op_popup_closed(),
         op_popup_close(),

@@ -409,7 +409,7 @@ impl CdpContext {
         self.sessions.retain(|_, v| v != id);
     }
 
-    fn allocate_context(
+    pub(crate) fn allocate_context(
         &mut self,
         page_id: &str,
         frame_id: &str,
@@ -1198,6 +1198,7 @@ pub(crate) fn drain_frame_events(ctx: &mut CdpContext) {
     let mut events: Vec<CdpEvent> = Vec::new();
     let mut announced: HashMap<String, Vec<String>> = HashMap::new();
     let mut detached = Vec::new();
+    let mut added_frame_contexts = Vec::new();
     for page in &ctx.pages {
         let Some(session_ids) = page_to_sessions.get(&page.id) else {
             continue;
@@ -1214,6 +1215,11 @@ pub(crate) fn drain_frame_events(ctx: &mut CdpContext) {
             if known.is_some_and(|ids| ids.iter().any(|seen| seen == id)) {
                 continue;
             }
+            added_frame_contexts.push((
+                page.id.clone(),
+                id.to_string(),
+                frame["url"].as_str().unwrap_or("about:blank").to_string(),
+            ));
             for session_id in session_ids {
                 // Attach before navigate: a client builds its frame from the
                 // attach event and treats a navigation of a frame it has never
@@ -1249,6 +1255,24 @@ pub(crate) fn drain_frame_events(ctx: &mut CdpContext) {
             }
         }
         announced.insert(page.id.clone(), live_ids);
+    }
+    // Runtime.executionContextCreated for each child frame's default world is
+    // essential for Playwright's FrameExecutionContext/locator routing. A
+    // frameAttached/frameNavigated notification alone is not sufficient.
+    for (page_id, frame_id, origin) in added_frame_contexts {
+        if ctx.contexts_for_page(&page_id).any(|record| {
+            record.is_default && record.frame_id == frame_id
+        }) {
+            continue;
+        }
+        let record = ctx.allocate_context(
+            &page_id, &frame_id, &origin, "", true,
+        );
+        for session in ctx.runtime_sessions_for_page(&page_id) {
+            events.push(crate::domains::runtime::execution_context_created_event(
+                &record, Some(session),
+            ));
+        }
     }
     for (page_id, frame_id, page_sessions) in detached {
         let removed = ctx.remove_frame_contexts(&page_id, &frame_id);
@@ -1369,6 +1393,39 @@ mod tests {
             .await.unwrap()["usedSize"].as_u64().unwrap();
         assert!(after + 2 * 1024 * 1024 < before,
             "explicit GC must reclaim discarded objects: {before} -> {after}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn child_frame_is_advertised_with_default_runtime_context() {
+        let mut ctx = CdpContext::new();
+        let page_id = ctx.create_page();
+        let session = format!("{page_id}-context-test");
+        ctx.sessions.insert(session.clone(), page_id.clone());
+        ctx.runtime_enabled_sessions.insert(session.clone());
+        ctx.get_page_mut(&page_id).unwrap().resume_js();
+        {
+            let page = ctx.get_page_mut(&page_id).unwrap();
+            let frame = obscura_js::frame::FrameRealm::new(
+                page.js.as_mut().unwrap(), 1, 0,
+                "https://child.example/frame",
+                "<html><body><div id='in-frame'>child</div></body></html>",
+            ).unwrap();
+            page.frames.push(frame);
+        }
+        drain_frame_events(&mut ctx);
+        let context = ctx.contexts_for_page(&page_id)
+            .find(|record| record.is_default && record.frame_id.ends_with("-frame-1"))
+            .expect("child default context must be allocated");
+        assert_eq!(context.origin, "https://child.example/frame");
+        assert!(ctx.pending_events.iter().any(|event| {
+            event.method == "Runtime.executionContextCreated"
+                && event.session_id.as_deref() == Some(&session)
+                && event.params["context"]["id"] == context.id
+        }));
+        drain_frame_events(&mut ctx);
+        assert_eq!(ctx.contexts_for_page(&page_id)
+            .filter(|record| record.is_default && record.frame_id.ends_with("-frame-1"))
+            .count(), 1, "child default context must not be re-advertised on every command");
     }
 
     #[tokio::test]
