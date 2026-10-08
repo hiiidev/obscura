@@ -15,6 +15,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# btls-sys/BoringSSL passes Clang-specific --target flags to C++ CMake tests.
+# Keep both C and C++ compilers on the same compatible toolchain.
+ENV CC=clang CXX=clang++
+
 WORKDIR /build
 
 # Cache dependency compilation by copying manifests first
