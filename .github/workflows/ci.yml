@@ -191,6 +191,15 @@ jobs:
       - name: Build render and stealth release
         run: cargo build --release -p obscura-cli --bins --features render,stealth
 
+      - name: Test CLI stealth proxy auth feature propagation
+        run: |
+          # Select the same CLI stealth feature used by release binaries.
+          # Do not enable obscura-cdp/stealth directly: a missing CLI feature
+          # edge must fail this regression test instead of being masked.
+          cargo nextest run --release -p obscura-cli -p obscura-cdp \
+            --features obscura-cli/render,obscura-cli/stealth \
+            stealth_proxy_credentials_refresh_existing_pages --no-fail-fast
+
       - name: Test the stealth transport
         run: |
           # The gzip fixture binds loopback. Keep the ordinary suite under the
