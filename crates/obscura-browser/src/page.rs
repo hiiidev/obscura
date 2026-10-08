@@ -4875,6 +4875,32 @@ impl Page {
         }
     }
 
+    /// The host drains these once script execution has yielded and allocates
+    /// pages under this Page's trusted BrowserContext.
+    pub fn take_pending_popups(&self) -> Vec<obscura_js::ops::PopupRequest> {
+        self.js.as_ref().map(|js| js.take_pending_popups()).unwrap_or_default()
+    }
+
+    pub fn take_pending_popup_closes(&self) -> Vec<String> {
+        self.js.as_ref().map(|js| js.take_pending_popup_closes()).unwrap_or_default()
+    }
+
+    /// Snapshot the opener before copying sessionStorage to a new top-level
+    /// browsing context. The popup gets a detached copy, not shared mutation.
+    pub fn snapshot_popup_session_storage(
+        &mut self,
+    ) -> std::collections::HashMap<String, std::collections::HashMap<String, String>> {
+        self.snapshot_web_storage();
+        self.session_storage.clone()
+    }
+
+    pub fn install_popup_session_storage(
+        &mut self,
+        session: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+    ) {
+        self.session_storage = session;
+    }
+
     pub fn take_pending_navigation(&self) -> Option<(String, String, String)> {
         let js = self.js.as_ref()?;
         let navigation = js.take_pending_navigation()?;
