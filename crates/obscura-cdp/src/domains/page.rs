@@ -1546,9 +1546,10 @@ pub async fn handle(
                         }
                     }
                 }
-                ctx.preload_scripts
-                    .push((identifier.clone(), source.to_string()));
             }
+            // Store empty sources too: Chrome returns a removable id for them.
+            ctx.preload_scripts
+                .push((identifier.clone(), source.to_string()));
             Ok(json!({ "identifier": identifier }))
         }
         "removeScriptToEvaluateOnNewDocument" => {
@@ -1556,7 +1557,12 @@ pub async fn handle(
                 .get("identifier")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
+            // Chrome reports an unknown or already removed id as an error.
+            let before = ctx.preload_scripts.len();
             ctx.preload_scripts.retain(|(id, _)| id != identifier);
+            if ctx.preload_scripts.len() == before {
+                return Err("Script not found".to_string());
+            }
             Ok(json!({}))
         }
         "setInterceptFileChooserDialog" => Ok(json!({})),
@@ -1668,10 +1674,14 @@ pub async fn handle(
                 (url, snapshot.0, snapshot.1)
             };
             if let Some(url) = target_url {
+                let preload_scripts: Vec<String> =
+                    ctx.preload_scripts.iter().map(|(_, s)| s.clone()).collect();
                 let nav_result = {
                     let page = ctx
                         .get_session_page_mut(session_id)
                         .ok_or("No page for session")?;
+                    // Same as do_navigate: the page keeps its own copy, so refresh it.
+                    page.set_preload_scripts(preload_scripts);
                     page.navigate_with_wait(&url, WaitUntil::DomContentLoaded)
                         .await
                 };
@@ -2098,6 +2108,67 @@ mod tests {
         }), &mut ctx, &session).await;
         assert!(isolated.is_err());
         assert!(ctx.preload_scripts.is_empty());
+    }
+
+    async fn preload_state(ctx: &mut CdpContext, session: &Option<String>) -> serde_json::Value {
+        ctx.get_session_page_mut(session).unwrap().js.as_mut().unwrap()
+            .evaluate("[globalThis.a ?? 0, globalThis.b ?? 0]").unwrap()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn removing_one_preload_keeps_the_other_and_unknown_id_errors() {
+        let mut ctx = CdpContext::new();
+        let page_id = ctx.create_page();
+        let session = Some(format!("{page_id}-session"));
+        ctx.sessions.insert(session.clone().unwrap(), page_id);
+        let a = handle("addScriptToEvaluateOnNewDocument", &json!({"source":"globalThis.a = 1"}),
+            &mut ctx, &session).await.unwrap();
+        let b = handle("addScriptToEvaluateOnNewDocument", &json!({"source":"globalThis.b = 1"}),
+            &mut ctx, &session).await.unwrap();
+        // An empty source still gets an identifier, so it must be removable.
+        let empty = handle("addScriptToEvaluateOnNewDocument", &json!({"source":""}),
+            &mut ctx, &session).await.unwrap();
+        handle("navigate", &json!({"url":"data:text/html,<title>one</title>"}), &mut ctx, &session)
+            .await.unwrap();
+        assert_eq!(preload_state(&mut ctx, &session).await, json!([1, 1]));
+
+        handle("removeScriptToEvaluateOnNewDocument", &a, &mut ctx, &session).await.unwrap();
+        handle("removeScriptToEvaluateOnNewDocument", &empty, &mut ctx, &session).await.unwrap();
+        handle("navigate", &json!({"url":"data:text/html,<title>two</title>"}), &mut ctx, &session)
+            .await.unwrap();
+        assert_eq!(preload_state(&mut ctx, &session).await, json!([0, 1]));
+        assert_eq!(ctx.preload_scripts.len(), 1);
+
+        // Chrome: "Script not found" for an id that is unknown or already removed.
+        for params in [a, json!({"identifier":"nope"}), json!({})] {
+            let error = handle("removeScriptToEvaluateOnNewDocument", &params, &mut ctx, &session)
+                .await.unwrap_err();
+            assert_eq!(error, "Script not found");
+        }
+        assert_eq!(ctx.preload_scripts.len(), 1);
+        handle("removeScriptToEvaluateOnNewDocument", &b, &mut ctx, &session).await.unwrap();
+        assert!(ctx.preload_scripts.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn history_navigation_uses_the_current_preload_list() {
+        let mut ctx = CdpContext::new();
+        let page_id = ctx.create_page();
+        let session = Some(format!("{page_id}-session"));
+        ctx.sessions.insert(session.clone().unwrap(), page_id);
+        let a = handle("addScriptToEvaluateOnNewDocument", &json!({"source":"globalThis.a = 1"}),
+            &mut ctx, &session).await.unwrap();
+        for title in ["one", "two"] {
+            handle("navigate", &json!({"url": format!("data:text/html,<title>{title}</title>")}),
+                &mut ctx, &session).await.unwrap();
+        }
+        // Registered after the last Page.navigate, removed after it: the page's
+        // own copy of the list is stale for the next navigation.
+        handle("addScriptToEvaluateOnNewDocument", &json!({"source":"globalThis.b = 1"}),
+            &mut ctx, &session).await.unwrap();
+        handle("removeScriptToEvaluateOnNewDocument", &a, &mut ctx, &session).await.unwrap();
+        handle("navigateToHistoryEntry", &json!({"entryId":0}), &mut ctx, &session).await.unwrap();
+        assert_eq!(preload_state(&mut ctx, &session).await, json!([0, 1]));
     }
 
     // #920: a history navigation that fails to load must not move the recorded
