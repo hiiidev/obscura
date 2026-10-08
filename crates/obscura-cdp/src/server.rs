@@ -1249,6 +1249,7 @@ async fn cdp_processor(
                     }
                     service_live_page_render_resources(&mut ctx);
                     sync_live_page_background_events(&mut ctx);
+                    dispatch::drain_popup_requests(&mut ctx);
                     dispatch::drain_runtime_events(&mut ctx);
                     dispatch::drain_binding_calls(&mut ctx);
                     dispatch::drain_frame_events(&mut ctx);
@@ -1277,6 +1278,20 @@ async fn cdp_processor(
                         .await;
                         idle_pages.clear();
                         runtime_pump_armed = ctx.pages.iter().any(|page| page.has_js());
+                    }
+                    if let Some(reply_tx) = connection_reply_tx.as_ref() {
+                        for _ in 0..32 {
+                            let Some((session_id, url)) = ctx.pending_popup_navigations.pop_front() else { break };
+                            let navigation = json!({
+                                "id": 0, "method": "Page.navigate",
+                                "params": {"url": url}, "sessionId": session_id,
+                            }).to_string();
+                            process_with_interception(
+                                &navigation, &mut ctx, reply_tx, &mut rx,
+                                &mut intercept_rx, &mut intercepted_paused,
+                                &mut deferred, false,
+                            ).await;
+                        }
                     }
                     // Ready page tasks must not keep this root future running
                     // indefinitely while Tokio's network tasks wait to run.
@@ -1386,6 +1401,24 @@ async fn cdp_processor(
                 &navigation, &mut ctx, reply_tx, &mut rx,
                 &mut intercept_rx, &mut intercepted_paused, &mut deferred, false,
             ).await;
+        }
+
+        // Create the popup at about:blank before its first network request,
+        // then navigate through the ordinary interception-aware page pipeline.
+        // This preserves the opener Context's proxy and auth credentials.
+        if let Some(reply_tx) = connection_reply_tx.as_ref() {
+            for _ in 0..32 {
+                let Some((session_id, url)) = ctx.pending_popup_navigations.pop_front() else { break };
+                let navigation = json!({
+                    "id": 0, "method": "Page.navigate",
+                    "params": {"url": url}, "sessionId": session_id,
+                }).to_string();
+                process_with_interception(
+                    &navigation, &mut ctx, reply_tx, &mut rx,
+                    &mut intercept_rx, &mut intercepted_paused,
+                    &mut deferred, false,
+                ).await;
+            }
         }
 
         // Dispatch may have created pages or scheduled work on an idle page.

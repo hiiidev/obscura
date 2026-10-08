@@ -1281,6 +1281,15 @@ impl ObscuraJsRuntime {
         self.state.borrow_mut().pending_navigation.take()
     }
 
+    /// Drain window.open requests only after JavaScript has exited the isolate.
+    pub fn take_pending_popups(&self) -> Vec<crate::ops::PopupRequest> {
+        self.state.borrow_mut().pending_popups.drain(..).collect()
+    }
+
+    pub fn take_pending_popup_closes(&self) -> Vec<String> {
+        std::mem::take(&mut self.state.borrow_mut().pending_popup_closes)
+    }
+
     /// Session history index that accompanies the pending navigation when
     /// page script traversed to another document with `history.go()`.
     pub fn take_pending_history_traversal(&self) -> Option<usize> {
