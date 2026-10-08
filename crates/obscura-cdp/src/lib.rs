@@ -1,5 +1,6 @@
 pub mod server;
 pub mod dispatch;
+pub(crate) mod popup;
 pub mod types;
 pub mod domains;
 pub mod cookie_params;
