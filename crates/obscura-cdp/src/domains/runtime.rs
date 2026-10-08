@@ -183,9 +183,22 @@ pub async fn handle(
                 });
             if let Some(frame_id) = child_frame {
                 let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
-                let remote = page.evaluate_child_frame_for_cdp(
-                    frame_id, expression, return_by_value,
-                )?;
+                let await_promise = params.get("awaitPromise")
+                    .and_then(Value::as_bool).unwrap_or(false);
+                let timeout_ms = params.get("timeout").and_then(Value::as_u64)
+                    .unwrap_or(30_000).min(60_000);
+                let remote = if await_promise {
+                    tokio::time::timeout(
+                        std::time::Duration::from_millis(timeout_ms),
+                        page.evaluate_child_frame_promise_for_cdp(
+                            frame_id, expression, return_by_value, timeout_ms,
+                        ),
+                    ).await.map_err(|_| "Child frame evaluate timed out".to_string())??
+                } else {
+                    page.evaluate_child_frame_for_cdp(
+                        frame_id, expression, return_by_value,
+                    )?
+                };
                 return Ok(json!({"result": remote}));
             }
 
@@ -389,7 +402,11 @@ pub async fn handle(
                     }})()",
                     oid = oid_literal,
                 );
-                let result = page.evaluate(&code);
+                let result = if oid.starts_with("frame:") {
+                    page.evaluate_frame_object_for_cdp(oid, &code)?
+                } else {
+                    page.evaluate(&code)
+                };
                 if let serde_json::Value::Array(props) = result {
                     let descriptors: Vec<Value> = props
                         .iter()
@@ -745,6 +762,49 @@ mod tests {
             &mut ctx, &session,
         ).await.expect("child frame awaited function");
         assert_eq!(value["result"]["value"], "BODY:child.example");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn child_frame_properties_and_evaluate_promise_use_frame_realm() {
+        let mut ctx = CdpContext::new();
+        let page_id = ctx.create_page();
+        let session = Some("child-objects".to_string());
+        ctx.sessions.insert(session.clone().unwrap(), page_id.clone());
+        {
+            let page = ctx.get_page_mut(&page_id).unwrap();
+            page.resume_js();
+            let frame = obscura_js::frame::FrameRealm::new(
+                page.js.as_mut().unwrap(), 1, 0,
+                "https://child.example/a",
+                "<html><body><input id='child' value='ok'></body></html>",
+            ).unwrap();
+            page.frames.push(frame);
+        }
+        let (context, _) = ctx.create_isolated_context(
+            &page_id, &format!("{page_id}-frame-1"), "https://child.example/a",
+            "test-world", false,
+        );
+        let result = handle("evaluate", &json!({
+            "contextId": context.id,
+            "expression": "Promise.resolve(42)",
+            "awaitPromise": true, "returnByValue": true, "timeout": 1000
+        }), &mut ctx, &session).await.unwrap();
+        assert_eq!(result["result"]["value"], 42);
+        let result = handle("evaluate", &json!({
+            "contextId": context.id,
+            "expression": "({answer: 42, child: document.querySelector('input')})",
+            "returnByValue": false
+        }), &mut ctx, &session).await.unwrap();
+        let oid = result["result"]["objectId"].as_str().unwrap();
+        let props = handle("getProperties", &json!({"objectId":oid}),
+            &mut ctx, &session).await.unwrap();
+        assert!(props["result"].as_array().unwrap().iter()
+            .any(|p| p["name"] == "answer" && p["value"]["value"] == 42));
+        assert!(props["result"].as_array().unwrap().iter()
+            .any(|p| p["name"] == "child"
+                && p["value"]["subtype"] == "node"
+                && p["value"]["objectId"].as_str()
+                    .unwrap_or("").starts_with("frame:1:")));
     }
 
     #[tokio::test]
