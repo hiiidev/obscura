@@ -721,6 +721,30 @@ mod tests {
         ).await.expect("frame-owned remote object");
         assert_eq!(remote["result"]["subtype"], "node");
         assert!(remote["result"]["objectId"].as_str().unwrap().starts_with("frame:1:"));
+        let oid = remote["result"]["objectId"].as_str().unwrap().to_string();
+        let text = handle(
+            "callFunctionOn",
+            &json!({
+                "objectId": oid,
+                "functionDeclaration": "function() { return this.tagName; }",
+                "returnByValue": true
+            }),
+            &mut ctx, &session,
+        ).await.expect("callFunctionOn must use the frame-owned object");
+        assert_eq!(text["result"]["value"], "BODY");
+
+        let value = handle(
+            "callFunctionOn",
+            &json!({
+                "executionContextId": record.id,
+                "functionDeclaration": "async function() { return document.body.tagName + ':' + location.hostname; }",
+                "returnByValue": true,
+                "awaitPromise": true,
+                "timeout": 2500
+            }),
+            &mut ctx, &session,
+        ).await.expect("child frame awaited function");
+        assert_eq!(value["result"]["value"], "BODY:child.example");
     }
 
     #[tokio::test]
