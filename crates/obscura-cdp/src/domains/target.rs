@@ -27,19 +27,9 @@ pub async fn handle(
                 }),
             ));
             for page in &ctx.pages {
+                let info = ctx.target_info(page, false);
                 ctx.pending_events.push(CdpEvent::new(
-                    "Target.targetCreated",
-                    json!({
-                        "targetInfo": {
-                            "targetId": page.id,
-                            "type": "page",
-                            "title": page.title,
-                            "url": page.url_string(),
-                            "attached": false,
-                            "canAccessOpener": false,
-                            "browserContextId": page.context.id,
-                        }
-                    }),
+                    "Target.targetCreated", json!({"targetInfo": info}),
                 ));
             }
             Ok(json!({}))
@@ -48,17 +38,7 @@ pub async fn handle(
             let targets: Vec<Value> = ctx
                 .pages
                 .iter()
-                .map(|page| {
-                    json!({
-                        "targetId": page.id,
-                        "type": "page",
-                        "title": page.title,
-                        "url": page.url_string(),
-                        "attached": true,
-                        "canAccessOpener": false,
-                        "browserContextId": page.context.id,
-                    })
-                })
+                .map(|page| ctx.target_info(page, true))
                 .collect();
             Ok(json!({ "targetInfos": targets }))
         }
@@ -189,15 +169,7 @@ pub async fn handle(
             if let Some(page) = ctx.get_page(target_id) {
                 let params = json!({
                     "sessionId": session_id,
-                    "targetInfo": {
-                        "targetId": target_id,
-                        "type": "page",
-                        "title": page.title,
-                        "url": page.url_string(),
-                        "attached": true,
-                        "canAccessOpener": false,
-                        "browserContextId": page.context.id,
-                    },
+                    "targetInfo": ctx.target_info(page, true),
                     "waitingForDebugger": false,
                 });
                 let event = match parent_session_id {
@@ -314,17 +286,7 @@ pub async fn handle(
             match target_id {
                 Some(id) => {
                     let page = ctx.get_page(id).ok_or("Target not found")?;
-                    Ok(json!({
-                        "targetInfo": {
-                            "targetId": id,
-                            "type": "page",
-                            "title": page.title,
-                            "url": page.url_string(),
-                            "attached": true,
-                            "canAccessOpener": false,
-                            "browserContextId": page.context.id,
-                        }
-                    }))
+                    Ok(json!({"targetInfo": ctx.target_info(page, true)}))
                 }
                 None => {
                     // canAccessOpener is required on every TargetInfo per the
