@@ -81,7 +81,7 @@ function fixture(options={}) {
         if(kind==='query'&&arg.method==='getUniformLocation')value={type:'query',value:{type:'uint',value:nextObject++}};
         if(kind==='readback'||kind==='sourceReadback'){data.fill(42);value={type:'boolean',value:true};}
         const dataReply=options.dataReply?.(operation,data);if(dataReply)value=dataReply;
-        return{lost:s.lost,accepted:!options.reject?.(operation),value};
+        return{lost:s.lost,accepted:!options.reject?.(operation),dirty:options.dirty?.(operation)===true,value};
       }
     }}
   };
@@ -94,6 +94,17 @@ function fixture(options={}) {
   const canvas=new Canvas();const gl=sandbox._webglCreate(canvas,'webgl',{});
   return {sandbox,canvas,gl,calls,tasks,events,native,metadata,states,registrations,retained,finalize,advanceDocument(){sandbox._hostState.documentGeneration=++documentGeneration;},loseNative(id=1){native.get(id).lost=true;tasks.push(lossWatchers.get(id));},drain(){for(let i=0;tasks.length&&i<100;i++)tasks.shift()();assert.equal(tasks.length,0);}};
 }
+test('dirty HTML WebGL commands tolerate absent optional Offscreen presentation hook',()=>{
+  const f=fixture({dirty:operation=>operation.kind==='viewport'});
+  assert.doesNotThrow(()=>f.gl.viewport(0,0,4,3));
+  assert.equal(f.calls.at(-1).operation.kind,'viewport');
+  const scheduled=[];
+  f.sandbox.schedulePlaceholder=canvas=>scheduled.push(canvas);
+  f.gl.viewport(0,0,4,3);
+  assert.deepEqual(scheduled,[f.canvas],'installed Offscreen presentation hook still receives dirty canvas');
+  delete f.sandbox.schedulePlaceholder;
+  assert.doesNotThrow(()=>f.gl.viewport(0,0,4,3));
+});
 test('context identity and canvas context exclusivity',()=>{
   const {sandbox,canvas,gl}=fixture();
   assert.equal(sandbox._webglCreate(canvas,'experimental-webgl',{}),gl);
