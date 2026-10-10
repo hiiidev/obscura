@@ -118,8 +118,8 @@ class _SoftwareWebGL {
       shader.parsed=position&&attrs.includes(position)?{position,attrs}:null;
     }else{
       const outName=(src.match(/\bout\s+vec4\s+([A-Za-z_]\w*)\s*;/)||[])[1]||'gl_FragColor';
-      const assign=src.split(';').find(s=>s.trim().startsWith(outName+' =')||s.trim().includes('\n'+outName+' ='));
-      const expr=assign?.split('=')?.slice(1).join('=').trim();
+      const match=new RegExp('\\b'+outName+'\\s*=\\s*([^;]+);').exec(src);
+      const expr=match?.[1]?.trim();
       const uniform=[...src.matchAll(/\buniform\s+vec4\s+([A-Za-z_]\w*)\s*;/g)].map(m=>m[1]);
       const rgba=expr?.match(/^vec4\s*\(\s*([-+.\deE]+)\s*(?:,\s*([-+.\deE]+)\s*,\s*([-+.\deE]+)\s*,\s*([-+.\deE]+)\s*)?\)$/);
       shader.parsed=expr&&uniform.includes(expr)?{uniform:expr}:
