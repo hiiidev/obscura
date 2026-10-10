@@ -451,6 +451,55 @@ impl CdpContext {
         Some(self.allocate_context(page_id, &frame_id, &origin, "", true))
     }
 
+    /// Synchronize the advertised child frame execution contexts with live
+    /// FrameRealms. This is also called by Runtime.enable for late-attaching
+    /// Playwright sessions, not just from Page.frameAttached notifications.
+    /// Return only newly allocated contexts so each client sees one creation.
+    pub(crate) fn ensure_live_frame_contexts(
+        &mut self,
+        page_id: &str,
+    ) -> Vec<ExecutionContextRecord> {
+        let frames = match self.get_page(page_id) {
+            Some(page) => crate::domains::page::child_frame_values(page)
+                .into_iter()
+                .filter_map(|frame| Some((
+                    frame.get("id")?.as_str()?.to_string(),
+                    frame.get("url")?.as_str()?.to_string(),
+                )))
+                .collect::<Vec<_>>(),
+            None => return Vec::new(),
+        };
+        let worlds = self.page_isolated_worlds.get(page_id).cloned()
+            .unwrap_or_default();
+        let mut worlds = worlds;
+        for world in &self.isolated_worlds {
+            if !worlds.contains(world) {
+                worlds.push(world.clone());
+            }
+        }
+        let mut created = Vec::new();
+        for (frame_id, origin) in frames {
+            if !self.contexts_for_page(page_id).any(|context|
+                context.is_default && context.frame_id == frame_id
+            ) {
+                created.push(self.allocate_context(
+                    page_id, &frame_id, &origin, "", true,
+                ));
+            }
+            for world in &worlds {
+                if !self.contexts_for_page(page_id).any(|context|
+                    !context.is_default && context.frame_id == frame_id
+                        && context.world_name == *world
+                ) {
+                    created.push(self.allocate_context(
+                        page_id, &frame_id, &origin, world, false,
+                    ));
+                }
+            }
+        }
+        created
+    }
+
     /// The single hook for an installed replacement Document.
     pub(crate) fn commit_default_context(
         &mut self,
@@ -1198,7 +1247,7 @@ pub(crate) fn drain_frame_events(ctx: &mut CdpContext) {
     let mut events: Vec<CdpEvent> = Vec::new();
     let mut announced: HashMap<String, Vec<String>> = HashMap::new();
     let mut detached = Vec::new();
-    let mut added_frame_contexts = Vec::new();
+
     for page in &ctx.pages {
         let Some(session_ids) = page_to_sessions.get(&page.id) else {
             continue;
@@ -1215,11 +1264,7 @@ pub(crate) fn drain_frame_events(ctx: &mut CdpContext) {
             if known.is_some_and(|ids| ids.iter().any(|seen| seen == id)) {
                 continue;
             }
-            added_frame_contexts.push((
-                page.id.clone(),
-                id.to_string(),
-                frame["url"].as_str().unwrap_or("about:blank").to_string(),
-            ));
+
             for session_id in session_ids {
                 // Attach before navigate: a client builds its frame from the
                 // attach event and treats a navigation of a frame it has never
@@ -1256,22 +1301,16 @@ pub(crate) fn drain_frame_events(ctx: &mut CdpContext) {
         }
         announced.insert(page.id.clone(), live_ids);
     }
-    // Runtime.executionContextCreated for each child frame's default world is
-    // essential for Playwright's FrameExecutionContext/locator routing. A
-    // frameAttached/frameNavigated notification alone is not sufficient.
-    for (page_id, frame_id, origin) in added_frame_contexts {
-        if ctx.contexts_for_page(&page_id).any(|record| {
-            record.is_default && record.frame_id == frame_id
-        }) {
-            continue;
-        }
-        let record = ctx.allocate_context(
-            &page_id, &frame_id, &origin, "", true,
-        );
-        for session in ctx.runtime_sessions_for_page(&page_id) {
-            events.push(crate::domains::runtime::execution_context_created_event(
-                &record, Some(session),
-            ));
+    // A child context can disappear on main-document navigation even when
+    // the frame ID remains in announced_frames. Rebuild by *live realms*,
+    // never only by newly emitted frameAttached events.
+    for page_id in page_to_sessions.keys() {
+        for record in ctx.ensure_live_frame_contexts(page_id) {
+            for session in ctx.runtime_sessions_for_page(page_id) {
+                events.push(crate::domains::runtime::execution_context_created_event(
+                    &record, Some(session),
+                ));
+            }
         }
     }
     for (page_id, frame_id, page_sessions) in detached {
@@ -1426,6 +1465,41 @@ mod tests {
         assert_eq!(ctx.contexts_for_page(&page_id)
             .filter(|record| record.is_default && record.frame_id.ends_with("-frame-1"))
             .count(), 1, "child default context must not be re-advertised on every command");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn child_context_rebinds_after_document_context_reset() {
+        let mut ctx = CdpContext::new();
+        let page_id = ctx.create_page();
+        let session = format!("{page_id}-rebind");
+        ctx.sessions.insert(session.clone(), page_id.clone());
+        ctx.runtime_enabled_sessions.insert(session.clone());
+        let page = ctx.get_page_mut(&page_id).unwrap();
+        page.resume_js();
+        page.frames.push(obscura_js::frame::FrameRealm::new(
+            page.js.as_mut().unwrap(), 1, 0,
+            "https://child.example/frame",
+            "<html><body><input id='inside'></body></html>",
+        ).unwrap());
+        drain_frame_events(&mut ctx);
+        let initial = ctx.contexts_for_page(&page_id).find(|r|
+            r.is_default && r.frame_id.ends_with("-frame-1")
+        ).unwrap().id;
+        assert!(ctx.announced_frames.get(&page_id).is_some());
+
+        let page_frame = ctx.get_page(&page_id).unwrap().frame_id.clone();
+        ctx.commit_default_context(&page_id, &page_frame, "https://parent.example/");
+        ctx.pending_events.clear();
+        drain_frame_events(&mut ctx);
+        let current = ctx.contexts_for_page(&page_id).find(|r|
+            r.is_default && r.frame_id.ends_with("-frame-1")
+        ).unwrap().id;
+        assert_ne!(initial, current);
+        assert!(ctx.pending_events.iter().any(|event|
+            event.method == "Runtime.executionContextCreated"
+                && event.session_id.as_deref() == Some(&session)
+                && event.params["context"]["id"] == current
+        ));
     }
 
     #[tokio::test]
