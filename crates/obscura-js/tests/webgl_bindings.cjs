@@ -35,6 +35,10 @@ function fixture(options={}) {
   class Image {constructor(){this._nid=42;}}
   class Video {}
   const sandbox={HTMLCanvasElement:Canvas,HTMLImageElement:Image,HTMLVideoElement:Video,DOMException,Event,Blob,console,Uint8Array,Uint8ClampedArray,Uint16Array,Float32Array,Int32Array,Uint32Array,ArrayBuffer,Map,WeakMap:TrackedWeakMap,WeakRef:ModelWeakRef,FinalizationRegistry:ModelFinalizationRegistry,Set,Symbol,
+    // This standalone VM fixture tests API binding semantics without the
+    // bootstrap's pixel fingerprint shader/noise helpers. Full profile
+    // variance remains an application-level graphics acceptance gate.
+    _fpRenderVariance:()=>false,_fpGpuVariance:()=>{},
     _hostState:{documentGeneration:1},
     _canvasBitmapDraw:null,_placeholderHas:()=>false,
     _canvas2DContext:canvas=>canvas?._ctx,
