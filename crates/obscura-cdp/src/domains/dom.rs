@@ -616,6 +616,36 @@ mod tests {
         assert_eq!(node["node"]["nodeType"], 1);
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn describe_iframe_links_element_handle_to_child_execution_frame() {
+        let mut ctx = CdpContext::new();
+        let page_id = ctx.create_page();
+        let session = Some("frame-owner".to_string());
+        ctx.sessions.insert(session.clone().unwrap(), page_id.clone());
+        let page = ctx.get_page_mut(&page_id).unwrap();
+        page.resume_js();
+        page.js.as_mut().unwrap().execute_script("frame-owner", r#"
+            const iframe = document.createElement('iframe');
+            document.body.appendChild(iframe);
+            iframe._frameId = 1;
+            globalThis.__obscura_frameElements[1] = iframe;
+            globalThis.__obscura_objects ??= Object.create(null);
+            globalThis.__obscura_objects['frame-owner-oid'] = iframe;
+        "#).unwrap();
+        page.frames.push(obscura_js::frame::FrameRealm::new(
+            page.js.as_mut().unwrap(), 1, 0, "https://child.example/",
+            "<html><body><button>inside</button></body></html>",
+        ).unwrap());
+        let response = handle("describeNode", &json!({
+            "objectId":"frame-owner-oid",
+        }), &mut ctx, &session).await.unwrap();
+        assert_eq!(response["node"]["frameId"], format!("{page_id}-frame-1"));
+        let owner = handle("getFrameOwner", &json!({
+            "frameId":format!("{page_id}-frame-1"),
+        }), &mut ctx, &session).await.unwrap();
+        assert_eq!(owner["backendNodeId"], response["node"]["backendNodeId"]);
+    }
+
     #[tokio::test]
     async fn describe_node_errors_on_unresolvable_object_id() {
         let mut ctx = CdpContext::new();
