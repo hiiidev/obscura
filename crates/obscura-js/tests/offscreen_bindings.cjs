@@ -10,7 +10,9 @@ const read=name=>fs.readFileSync(path.join(__dirname,'../js',name),'utf8');
 const bootstrap=read('bootstrap.js');
 const png=bootstrap.slice(bootstrap.indexOf('function _encodePNG('),bootstrap.indexOf('globalThis.__ariaQuerySelector ='));
 const canvas=bootstrap.slice(bootstrap.indexOf('const _MAX_CANVAS_DIMENSION'),bootstrap.indexOf('/* @obscura-webgl */'));
-const htmlCanvasStart=bootstrap.indexOf('class HTMLCanvasElement extends Element');
+// The canvas fixture already contains the HTMLCanvasElement class. Append
+// only the methods installed after the optional WebGL injection marker.
+const htmlCanvasStart=bootstrap.indexOf('HTMLCanvasElement.prototype.getContext =',bootstrap.indexOf('/* @obscura-webgl */'));
 const htmlCanvasEnd=bootstrap.indexOf('Element.prototype.getBBox =',htmlCanvasStart);
 assert.ok(htmlCanvasStart>=0&&htmlCanvasEnd>htmlCanvasStart,'HTML canvas fixture boundaries must include the implementation');
 const htmlCanvas=bootstrap.slice(htmlCanvasStart,htmlCanvasEnd);
