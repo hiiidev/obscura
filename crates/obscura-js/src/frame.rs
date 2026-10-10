@@ -119,6 +119,9 @@ impl FrameRealm {
             url: url.to_string(),
             origin,
         };
+        // The frame has independent Date/Intl builtins and must apply the
+        // same context-scoped timezone before any author code runs.
+        realm.run(parent, include_str!("../js/timezone.js")).ok()?;
         // Both ids before init, not after: init is what installs `parent` and
         // `top`, and a document that runs even one script believing it is
         // top-level has already taken the wrong branch.
@@ -132,6 +135,7 @@ impl FrameRealm {
                 ),
             )
             .ok()?;
+        realm.run(parent, "globalThis.__obscura_setTimezoneOverride(globalThis.__obscura_tz || '');").ok()?;
         // Only after init, so the document the page reaches through
         // `contentDocument` is the initialized one.
         if same_origin {
