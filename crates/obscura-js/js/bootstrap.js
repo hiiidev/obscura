@@ -14628,6 +14628,8 @@ class _Canvas2D {
     this._w = valid ? requestedWidth : 0;
     this._h = valid ? requestedHeight : 0;
     this._buf = new Uint8ClampedArray(this._w * this._h * 4);
+    // HTML and Offscreen resize replace tainted storage with a clean bitmap.
+    this._originClean = true;
     this._resetDrawingState();
     // Standalone storage has no DOM node. It must never register or damage a
     // page surface; placeholders are published through a separate native op.
@@ -14757,6 +14759,7 @@ class _Canvas2D {
     return { width: String(t).length * 6 * scale, actualBoundingBoxAscent: 7*scale, actualBoundingBoxDescent: 2*scale };
   }
   getImageData(x, y, w, h) {
+    if (!this._originClean) throw new DOMException('Canvas is not origin-clean','SecurityError');
     x=Math.round(x); y=Math.round(y); w=Math.round(w); h=Math.round(h);
     const data = new Uint8ClampedArray(w * h * 4);
     for (let py = 0; py < h; py++) {
@@ -14794,7 +14797,11 @@ class _Canvas2D {
   }
   createImageData(w, h) { return { data: new Uint8ClampedArray(w*h*4), width: w, height: h }; }
   drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh) {
+    // This CPU canvas only implements canvas-to-canvas image copying.
+    // Unverified image and bitmap sources must fail closed until their CORS
+    // metadata and decoded pixels are available through the browser cache.
     if (img && img._ctx && img._ctx._buf) {
+      if (img._ctx._originClean === false) this._originClean = false;
       const src = img._ctx;
       dx = dx ?? sx; dy = dy ?? sy; dw = dw ?? (sw ?? src._w); dh = dh ?? (sh ?? src._h);
       for (let py = 0; py < dh; py++) {
@@ -14808,6 +14815,7 @@ class _Canvas2D {
         }
       }
     }
+    if (!(img && img._ctx && img._ctx._buf)) this._originClean = false;
     this._markPaintDamage();
   }
   beginPath() { this._path = []; }
@@ -15110,6 +15118,7 @@ HTMLCanvasElement.prototype.toDataURL = function(type) {
   }
   const ctx = this._ctx || this.getContext('2d');
   if (ctx && ctx._buf) {
+    if (ctx._originClean === false) throw new DOMException('Canvas is not origin-clean','SecurityError');
     if (ctx._w === 0 || ctx._h === 0) return 'data:,';
     return _encodePNG(ctx._w, ctx._h, ctx._buf);
   }
