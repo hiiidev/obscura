@@ -177,3 +177,69 @@ async fn network_import_rejects_proxy_407_without_direct_fallback() {
         serde_json::json!(["NetworkError"]));
     proxy_thread.join().unwrap();
 }
+
+
+#[tokio::test(flavor = "current_thread")]
+async fn dedicated_worker_has_no_document_or_window_global() {
+    let mut js = ObscuraJsRuntime::new();
+    js.run_page_init();
+    js.execute_script("dedicated-worker-global-scope", r#"
+        globalThis.__dedicatedWorkerResults = [];
+        const source = [
+            'postMessage({',
+            '  documentType: typeof document,',
+            '  windowType: typeof window,',
+            '  selfDocumentType: typeof self.document,',
+            '  globalDocumentType: typeof globalThis.document,',
+            '  importScriptsType: typeof importScripts,',
+            '  selfType: typeof self,',
+            '  locationType: typeof location,',
+            '  globalThisIsSelf: globalThis === self',
+            '});'
+        ].join('\\n');
+        const workerURL = URL.createObjectURL(new Blob([source], {type:'text/javascript'}));
+        const worker = new Worker(workerURL);
+        worker.onmessage = event => {
+            __dedicatedWorkerResults.push(event.data);
+            worker.terminate();
+        };
+    "#).unwrap();
+    js.run_event_loop_bounded(100).await.unwrap();
+    assert_eq!(js.evaluate("__dedicatedWorkerResults").unwrap(),
+        serde_json::json!([{
+            "documentType": "undefined",
+            "windowType": "undefined",
+            "selfDocumentType": "undefined",
+            "globalDocumentType": "undefined",
+            "importScriptsType": "function",
+            "selfType": "object",
+            "locationType": "object",
+            "globalThisIsSelf": true
+        }]));
+    assert_eq!(js.evaluate("typeof document").unwrap(), serde_json::json!("object"),
+        "the parent page must retain its DOM");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn imported_worker_script_and_message_handler_do_not_inherit_window_globals() {
+    let mut js = ObscuraJsRuntime::new();
+    js.run_page_init();
+    js.execute_script("dedicated-worker-import-global-scope", r#"
+        globalThis.__workerScopeResults = [];
+        const imported = URL.createObjectURL(new Blob([
+            'self.importDoc = typeof document;',
+            'self.importWindow = typeof globalThis.window;',
+        ], {type: 'text/javascript'}));
+        const source = 'importScripts(' + JSON.stringify(imported) + ');'
+            + 'onmessage = function() { postMessage(['
+            + 'typeof document, typeof window, self.importDoc,'
+            + 'self.importWindow, globalThis === self]); };';
+        const u = URL.createObjectURL(new Blob([source], {type:'text/javascript'}));
+        const w = new Worker(u);
+        w.onmessage = e => { __workerScopeResults.push(e.data); w.terminate(); };
+        w.postMessage('probe');
+    "#).unwrap();
+    js.run_event_loop_bounded(100).await.unwrap();
+    assert_eq!(js.evaluate("__workerScopeResults").unwrap(),
+        serde_json::json!([["undefined", "undefined", "undefined", "undefined", true]]));
+}
