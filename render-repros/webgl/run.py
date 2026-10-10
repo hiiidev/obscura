@@ -39,31 +39,31 @@ async def main(args):
                 assert probe[:2]==[True,True] and all(abs(a-b)<=2 for a,b in zip(probe[2],[255,0,0,255])),probe
             else:
                 if args.scope in ('full','core'):
-                  for version in [1,2]:
-                      for scene in ['clear','triangle','texture','alpha','resize']:
-                          label=f'webgl{version}-{scene}'
-                          item=await asyncio.wait_for(page.evaluate('args=>runScene(args)',{'version':version,'scene':scene}),30)
-                          raw=item.pop('readPixelsBase64');png=item.pop('png')
-                          (args.out/(label+'.rgba')).write_bytes(base64.b64decode(raw))
-                          (args.out/(label+'.canvas.png')).write_bytes(base64.b64decode(png.split(',',1)[1]))
-                          await page.screenshot(path=str(args.out/(label+'.browser.png')))
-                          result['scenes'].append(item)
-                          assert item['error']==0 and item['pixel_checks_passed'],item
-                          assert item['timer_ticks']>0 and item['mutation_count']>0,item
-                          assert item['viewport']==[800,600,1],item
-                  if args.scope in ('full','presentation'):
-                  presentation=await asyncio.wait_for(page.evaluate('()=>runPresentation()'),30)
-                  png=presentation.pop('png');(args.out/'placeholder.canvas.png').write_bytes(base64.b64decode(png.split(',',1)[1]))
-                  await page.screenshot(path=str(args.out/'placeholder-svg.browser.png'))
-                  result['presentation']=presentation
-                  assert presentation['presented']==[30,10]
-                  assert presentation['author_dimensions']==[90,10] and presentation['bitmap_dimensions']==[30,10]
-                  assert all(abs(a-b)<=2 for a,b in zip(presentation['bitmap_pixel'],[255,0,0,255]))
-                  assert presentation['svg_natural']==[300,150] and presentation['svg_rect']==[300,150]
-                  # The renderer rounds paint geometry to device pixels. Preserve
-                  # the measured fractional Chromium geometry rather than claiming parity.
-                  assert presentation['rect'][0]==100 and abs(presentation['rect'][1]-100/9)<=1
-              assert not external,external
+                    for version in [1,2]:
+                        for scene in ['clear','triangle','texture','alpha','resize']:
+                            label=f'webgl{version}-{scene}'
+                            item=await asyncio.wait_for(page.evaluate('args=>runScene(args)',{'version':version,'scene':scene}),30)
+                            raw=item.pop('readPixelsBase64');png=item.pop('png')
+                            (args.out/(label+'.rgba')).write_bytes(base64.b64decode(raw))
+                            (args.out/(label+'.canvas.png')).write_bytes(base64.b64decode(png.split(',',1)[1]))
+                            await page.screenshot(path=str(args.out/(label+'.browser.png')))
+                            result['scenes'].append(item)
+                            assert item['error']==0 and item['pixel_checks_passed'],item
+                            assert item['timer_ticks']>0 and item['mutation_count']>0,item
+                            assert item['viewport']==[800,600,1],item
+                if args.scope in ('full','presentation'):
+                    presentation=await asyncio.wait_for(page.evaluate('()=>runPresentation()'),30)
+                    png=presentation.pop('png');(args.out/'placeholder.canvas.png').write_bytes(base64.b64decode(png.split(',',1)[1]))
+                    await page.screenshot(path=str(args.out/'placeholder-svg.browser.png'))
+                    result['presentation']=presentation
+                    assert presentation['presented']==[30,10]
+                    assert presentation['author_dimensions']==[90,10] and presentation['bitmap_dimensions']==[30,10]
+                    assert all(abs(a-b)<=2 for a,b in zip(presentation['bitmap_pixel'],[255,0,0,255]))
+                    assert presentation['svg_natural']==[300,150] and presentation['svg_rect']==[300,150]
+                    # The renderer rounds paint geometry to device pixels. Preserve
+                    # the measured fractional Chromium geometry rather than claiming parity.
+                    assert presentation['rect'][0]==100 and abs(presentation['rect'][1]-100/9)<=1
+            assert not external,external
         finally:
             try:
                 if context is not None:await context.close()
