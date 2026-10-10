@@ -94,15 +94,16 @@ function fixture(options={}) {
   const canvas=new Canvas();const gl=sandbox._webglCreate(canvas,'webgl',{});
   return {sandbox,canvas,gl,calls,tasks,events,native,metadata,states,registrations,retained,finalize,advanceDocument(){sandbox._hostState.documentGeneration=++documentGeneration;},loseNative(id=1){native.get(id).lost=true;tasks.push(lossWatchers.get(id));},drain(){for(let i=0;tasks.length&&i<100;i++)tasks.shift()();assert.equal(tasks.length,0);}};
 }
-test('dirty HTML WebGL commands tolerate absent optional Offscreen presentation hook',()=>{
+test('dirty HTML WebGL commands ignore page-owned presentation globals without Offscreen adapter',()=>{
   const f=fixture({dirty:operation=>operation.kind==='command'&&operation.value?.method==='viewport'});
+  const hijacks=[];
+  f.sandbox.schedulePlaceholder=canvas=>hijacks.push(canvas);
   assert.doesNotThrow(()=>f.gl.viewport(0,0,4,3));
   assert.equal(f.calls.at(-1).operation.kind,'command');
   assert.equal(f.calls.at(-1).operation.value.method,'viewport');
-  const scheduled=[];
-  f.sandbox.schedulePlaceholder=canvas=>scheduled.push(canvas);
-  f.gl.viewport(0,0,4,3);
-  assert.deepEqual(scheduled,[f.canvas],'installed Offscreen presentation hook still receives dirty canvas');
+  assert.deepEqual(hijacks,[],'page global cannot hijack native rendering lifecycle');
+  f.sandbox.schedulePlaceholder=()=>{throw Error('page callback must never run');};
+  assert.doesNotThrow(()=>f.gl.viewport(0,0,4,3));
   delete f.sandbox.schedulePlaceholder;
   assert.doesNotThrow(()=>f.gl.viewport(0,0,4,3));
 });
