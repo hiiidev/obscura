@@ -186,6 +186,8 @@ function schedulePlaceholder(canvas) {
     _scheduleRenderingOpportunity();
   });
 }
+// Only this native adapter can publish the private WebGL presentation hook.
+scheduleOffscreenPresentation = schedulePlaceholder;
 function presentPlaceholder(reference) {
   const canvas=reference.deref(),current=canvas&&offscreens.get(canvas);
   if(!current)return;
