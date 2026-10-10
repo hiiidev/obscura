@@ -247,9 +247,9 @@ mod tests {
             Some("Asia/Tokyo"));
 
         // The next document gets the same Context preference.
-        ctx.get_session_page_mut(&sa).unwrap().set_html(
-            "<html><body>next</body></html>", "https://example.com/next",
-        );
+        ctx.get_session_page_mut(&sa).unwrap().navigate(
+            "data:text/html,<html><body>next</body></html>",
+        ).await.unwrap();
         assert_eq!(ctx.get_session_page_mut(&sa).unwrap().evaluate(probe),
             json!(["America/New_York", 7, 300]));
         assert!(handle("setTimezoneOverride",
