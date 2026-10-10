@@ -1161,10 +1161,13 @@ let _rafFrameScheduled = false;
 let _rafRunningFrame = false;
 let _renderOpportunityScheduled = false;
 let _renderOpportunityRunning = false;
+// Native Offscreen presentation shares the existing browser rendering phase.
+let _canvasPresentationPending = false;
+let _runCanvasPresentation = () => {};
 
 function _renderOpportunityHasWork() {
   return _rafFrameScheduled || _resizeRenderCheckpointPending
-    || _intersectionRenderCheckpointPending;
+    || _intersectionRenderCheckpointPending || _canvasPresentationPending;
 }
 
 // Gecko and the HTML rendering algorithm use one refresh opportunity for
@@ -1191,6 +1194,7 @@ function _runRenderingOpportunity() {
     if (_rafFrameScheduled) _runAnimationFrameBatch();
     if (_resizeRenderCheckpointPending) _runResizeRenderCheckpoint();
     if (_intersectionRenderCheckpointPending) _runIntersectionRenderCheckpoint();
+    if (_canvasPresentationPending) _runCanvasPresentation();
   } finally {
     _renderOpportunityRunning = false;
     _scheduleRenderingOpportunity();
@@ -14590,12 +14594,15 @@ globalThis.__ariaQuerySelectorAll = async function*(root, selector) { /* yields 
 const _MAX_CANVAS_DIMENSION = 32767;
 const _MAX_CANVAS_PIXELS = 67108864;
 class _Canvas2D {
-  constructor(canvas) {
+  constructor(canvas, options = null) {
     this.canvas = canvas;
+    this._offscreenOptions = options;
+    this._originClean = true;
     this._damageQueued = false;
     this._resizeFromCanvas();
   }
   _canvasDimension(name, fallback) {
+    if (this._offscreenOptions) return this._offscreenOptions.dimensions()[name];
     const raw = this.canvas.getAttribute(name);
     if (raw === null || raw === '') return fallback;
     const parsed = Number.parseInt(raw, 10);
@@ -14622,7 +14629,9 @@ class _Canvas2D {
     this._h = valid ? requestedHeight : 0;
     this._buf = new Uint8ClampedArray(this._w * this._h * 4);
     this._resetDrawingState();
-    const register = __obscuraCore.ops.op_canvas_register_surface;
+    // Standalone storage has no DOM node. It must never register or damage a
+    // page surface; placeholders are published through a separate native op.
+    const register = this._offscreenOptions ? null : __obscuraCore.ops.op_canvas_register_surface;
     if (typeof register === 'function') {
       // op2 accepts Uint8Array, while Canvas exposes Uint8ClampedArray. This
       // second view shares the exact backing store; no pixel copy is made.
@@ -14641,8 +14650,12 @@ class _Canvas2D {
     this._damageQueued = true;
     queueMicrotask(() => {
       this._damageQueued = false;
-      const damage = __obscuraCore.ops.op_canvas_paint_damage;
-      if (typeof damage === 'function') damage(this.canvas._nid, _realmFrameId);
+      if (this._offscreenOptions) {
+        this._offscreenOptions.changed();
+      } else {
+        const damage = __obscuraCore.ops.op_canvas_paint_damage;
+        if (typeof damage === 'function') damage(this.canvas._nid, _realmFrameId);
+      }
     });
   }
   _parseColor(css) {
@@ -14977,13 +14990,19 @@ class HTMLCanvasElement extends Element {
     const parsed = raw === null ? 300 : Number.parseInt(raw, 10);
     return Number.isFinite(parsed) && parsed >= 0 ? parsed : 300;
   }
-  set width(value) { this.setAttribute('width', Math.max(0, Number(value) || 0)); }
+  set width(value) {
+    if (_placeholderHas(this)) throw new DOMException('Canvas control has been transferred','InvalidStateError');
+    this.setAttribute('width', Math.max(0, Number(value) || 0));
+  }
   get height() {
     const raw = this.getAttribute('height');
     const parsed = raw === null ? 150 : Number.parseInt(raw, 10);
     return Number.isFinite(parsed) && parsed >= 0 ? parsed : 150;
   }
-  set height(value) { this.setAttribute('height', Math.max(0, Number(value) || 0)); }
+  set height(value) {
+    if (_placeholderHas(this)) throw new DOMException('Canvas control has been transferred','InvalidStateError');
+    this.setAttribute('height', Math.max(0, Number(value) || 0));
+  }
   setAttribute(name, value) {
     super.setAttribute(name, value);
     const normalized = String(name).toLowerCase();
@@ -15010,6 +15029,10 @@ let _webglCreate = () => null;
 let _webglHas = () => false;
 let _webglResize = () => {};
 let _webglReadback = () => null;
+let _placeholderHas = () => false;
+let _placeholderPixels = () => null;
+let _placeholderBlob = () => {};
+let _transferOffscreen = null;
 // Per-document WebGL owner bridge. Native ops validate the document epoch,
 // frame and DOM node before loading or issuing commands to ANGLE.
 let _canvasDocumentEpoch = 0;
@@ -15017,6 +15040,17 @@ const _canvasDOMOwners = new WeakMap();
 const _canvas2DContext = canvas => canvas._ctxKind === '2d' ? canvas._ctx : null;
 const _canvas2DPixels = ctx => ctx && ctx._buf ?
   {width:ctx._w,height:ctx._h,bytes:ctx._buf,originClean:ctx._originClean!==false} : null;
+function _requireCanvasOwner(canvas) {
+  const owner = _canvasDOMOwner(canvas);
+  if (!owner) throw new DOMException('Canvas does not belong to this document','InvalidStateError');
+  return owner;
+}
+function _reflectCanvasDimensions(canvas,width,height) {
+  // Reflect the last presented bitmap dimensions without invoking a second
+  // WebGL/Canvas2D allocation or changing DOM author-owned context state.
+  Element.prototype.setAttribute.call(canvas,'width',String(width));
+  Element.prototype.setAttribute.call(canvas,'height',String(height));
+}
 function _canvasDOMOwner(canvas) {
   if (!canvas || !Number.isInteger(canvas._nid) || _cache.get(canvas._nid) !== canvas) return null;
   const frame = _realmFrameId;
@@ -15036,6 +15070,7 @@ const _fpGpuVariance = () => {};
 /* @obscura-webgl */
 
 HTMLCanvasElement.prototype.getContext = function getContext(type, attributes) {
+  if (_placeholderHas(this)) throw new DOMException('Canvas control has been transferred','InvalidStateError');
   const normalized = String(type);
   if (normalized === '2d') {
     if (_webglHas(this)) return null;
@@ -15064,6 +15099,10 @@ HTMLCanvasElement.prototype.getContext = function getContext(type, attributes) {
   return null;
 };
 HTMLCanvasElement.prototype.toDataURL = function(type) {
+  if (_placeholderHas(this)) {
+    const pixels = _placeholderPixels(this,false);
+    return pixels?.width && pixels?.height ? _encodePNG(pixels.width,pixels.height,pixels.bytes) : 'data:,';
+  }
   if (_webglHas(this)) {
     const pixels = _webglReadback(this);
     return pixels && pixels.width && pixels.height ?
@@ -15093,6 +15132,11 @@ Element.prototype.getSubStringLength = function(ch, len) { return 0; };
 _markNative(HTMLCanvasElement.prototype.getContext);
 _markNative(HTMLCanvasElement.prototype.toDataURL);
 _markNative(HTMLCanvasElement.prototype.toBlob);
+if (_transferOffscreen) {
+  Object.defineProperty(HTMLCanvasElement.prototype,'transferControlToOffscreen',
+    {value:_transferOffscreen,configurable:true,writable:true});
+  _markNative(_transferOffscreen);
+}
 
 Element.prototype.attachShadow = function attachShadow(opts) {
   var _mode = opts == null ? undefined : opts.mode;
