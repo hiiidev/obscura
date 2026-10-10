@@ -28,6 +28,14 @@ jobs:
           targets: aarch64-apple-darwin
       - name: Build render-enabled Apple Silicon candidate
         run: cargo build --profile release-dist --target aarch64-apple-darwin -p obscura-cli --bins --features render
+      - name: Test DedicatedWorker imports and global isolation
+        run: cargo test --profile release-dist --target aarch64-apple-darwin -p obscura-js --features render --test import_scripts
+      - name: Test frame and timezone CDP regressions
+        run: |
+          cargo test --profile release-dist --target aarch64-apple-darwin -p obscura-cdp --features render timezone_override_is_context_scoped_and_survives_navigation
+          cargo test --profile release-dist --target aarch64-apple-darwin -p obscura-cdp --features render child_context_rebinds_after_document_context_reset
+          cargo test --profile release-dist --target aarch64-apple-darwin -p obscura-cdp --features render runtime_enable_late_session_advertises_live_child_worlds
+          cargo test --profile release-dist --target aarch64-apple-darwin -p obscura-cdp --features render describe_iframe_links_element_handle_to_child_execution_frame
       - name: Smoke test V8 initialization
         run: |
           target/aarch64-apple-darwin/release-dist/obscura fetch \
