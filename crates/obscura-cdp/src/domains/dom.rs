@@ -134,6 +134,26 @@ pub async fn handle(
             }).unwrap_or_default();
             Ok(json!({ "outerHTML": html }))
         }
+        "getFrameOwner" => {
+            let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
+            let protocol_id = params.get("frameId").and_then(Value::as_str)
+                .ok_or("frameId required")?;
+            let id = protocol_id.strip_prefix(&format!("{}-frame-", page.frame_id))
+                .and_then(|id| id.parse::<u32>().ok())
+                .ok_or("Unknown child frameId")?;
+            let frame = page.frames.iter().find(|f| f.frame_id() == id)
+                .ok_or("Frame is no longer attached")?;
+            if frame.parent_frame_id() != 0 {
+                return Err("Nested frame owner nodes require frame-qualified backendNodeIds".into());
+            }
+            let node_id = page.evaluate(&format!(
+                "(() => globalThis.__obscura_frameElements?.[{id}]?._nid ?? 0)()",
+            )).as_u64().unwrap_or(0);
+            if node_id == 0 {
+                return Err("Frame owner element is no longer attached".into());
+            }
+            Ok(json!({"nodeId":node_id,"backendNodeId":node_id}))
+        }
         "describeNode" => {
             let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
             let depth = params.get("depth").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -150,9 +170,16 @@ pub async fn handle(
                     let code = format!(
                         "(() => {{ const n = globalThis.__obscura_objects?.[{literal}];                          if (!n || typeof n.nodeType !== 'number') return null;                          return {{nodeType:n.nodeType,nodeName:n.nodeName || '',                          localName:n.localName || '',nodeValue:n.nodeValue || '',                          childNodeCount:n.childNodes?.length || 0}}; }})()"
                     );
-                    let node = page.evaluate_frame_object_for_cdp(oid, &code)?;
+                    let mut node = page.evaluate_frame_object_for_cdp(oid, &code)?;
                     if node.is_null() {
                         return Err(format!("Child frame objectId {oid} is not a node"));
+                    }
+                    let child_id = page.evaluate_frame_object_for_cdp(oid, &format!(
+                        "(() => globalThis.__obscura_objects?.[{}]?._frameId ?? 0)()",
+                        crate::util::object_id_literal(oid),
+                    ))?.as_u64().unwrap_or(0) as u32;
+                    if child_id != 0 && page.frames.iter().any(|f| f.frame_id() == child_id) {
+                        node["frameId"] = json!(format!("{}-frame-{child_id}", page.frame_id));
                     }
                     return Ok(json!({"node":node}));
                 }
@@ -172,9 +199,26 @@ pub async fn handle(
                 return Err("nodeId or objectId required".to_string());
             };
 
-            let node = page.with_dom(|dom| {
+            let mut node = page.with_dom(|dom| {
                 serialize_node(dom, NodeId::new(node_id as u32), depth as u32, 0)
             }).unwrap_or(json!(null));
+            // Playwright resolves iframe ElementHandles to Frame objects through
+            // DOM.describeNode(...).node.frameId. Without this field
+            // frameLocator() can find the iframe element but never enter it.
+            let owner_id = if let Some(oid) = params.get("objectId").and_then(Value::as_str) {
+                let literal = crate::util::object_id_literal(oid);
+                page.evaluate(&format!(
+                    "(() => globalThis.__obscura_objects?.[{literal}]?._frameId ?? 0)()",
+                )).as_u64().unwrap_or(0) as u32
+            } else {
+                page.evaluate(&format!(
+                    "(() => Object.values(globalThis.__obscura_frameElements || {{}})                     .find(e => e && e._nid === {})?._frameId ?? 0)()",
+                    node_id,
+                )).as_u64().unwrap_or(0) as u32
+            };
+            if owner_id != 0 && page.frames.iter().any(|f| f.frame_id() == owner_id) {
+                node["frameId"] = json!(format!("{}-frame-{owner_id}", page.frame_id));
+            }
             Ok(json!({ "node": node }))
         }
         "resolveNode" => {
