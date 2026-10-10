@@ -136,6 +136,38 @@ jobs:
             --endpoint http://127.0.0.1:9333 --out "$root/captures/metal-core-1" --scope core
           "$root/venv/bin/python" render-repros/webgl/run.py \
             --endpoint http://127.0.0.1:9333 --out "$root/captures/metal-core-2" --scope core
+      - name: Native ANGLE Metal context ownership and cleanup tests
+        env:
+          OBSCURA_WEBGL_LIB_DIR: ${{ runner.temp }}/angle-smoke/bundle
+          OBSCURA_WEBGL_TEST_BACKEND: metal
+          CARGO_BUILD_JOBS: "2"
+          CARGO_INCREMENTAL: "0"
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/angle-smoke"
+          rustc --version | tee "$root/logs/driver-rust-version.txt"
+          cargo --version | tee -a "$root/logs/driver-rust-version.txt"
+          # This crate has no V8 isolate, so each exact ignored real-driver
+          # test can safely run in its own cargo-test process. V8 fixtures
+          # require a separately configured nextest gate and remain pending.
+          for name in \
+            real_webgl1_and_webgl2_buffers_start_zero_and_render_clear \
+            real_shaders_buffers_and_drawing_produce_pixels_in_both_versions \
+            real_contexts_do_not_share_drawing_buffers_or_gl_state \
+            real_resize_clears_pixels_and_allocation_failure_retains_old_surface \
+            real_new_and_resized_drawing_buffers_never_expose_freed_surface_memory \
+            real_repeated_context_cleanup_releases_live_gl_objects \
+            initial_activation_failure_rejects_creation \
+            initial_clear_failure_rejects_creation \
+            activation_failure_after_creation_loses_context; do
+            echo "::group::native-driver $name"
+            cargo test --locked --target aarch64-apple-darwin \
+              -p obscura-webgl --lib "driver_tests::$name" \
+              -- --ignored --exact --nocapture \
+              2>&1 | tee "$root/logs/driver-$name.log"
+            grep -Eq 'test result: ok\. 1 passed; 0 failed' "$root/logs/driver-$name.log"
+            echo "::endgroup::"
+          done
       # Keep optional canvas transfer failures distinct from Metal WebGL core.
       # This is a required-but-pending acceptance gate, not a known-green test.
       - name: OffscreenCanvas placeholder and SVG presentation acceptance
