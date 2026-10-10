@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "angle": {
+    "repository": "https://chromium.googlesource.com/angle/angle",
+    "commit": "3796c6cb739503fba75ebc416a3c6b55c2fce783"
+  },
+  "swiftshader": {
+    "repository": "https://swiftshader.googlesource.com/SwiftShader",
+    "commit": "1e80438d2b93ef36a7c05f8d2b81233bac0e3d16",
+    "selection": "Matches third_party/SwiftShader in this ANGLE revision's DEPS"
+  },
+  "depot_tools": {
+    "repository": "https://chromium.googlesource.com/chromium/tools/depot_tools.git",
+    "commit": "3da9fbae7a51a34828c5c05a3442ce77429803cc"
+  },
+  "glow": {
+    "version": "0.17.0",
+    "crate_sha256": "29038e1c483364cc6bb3cf78feee1816002e127c331a1eec55a4d202b9e1adb5"
+  },
+  "libloading": {
+    "version": "0.8.9",
+    "crate_sha256": "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+  },
+  "webgl_interface_reference": {
+    "repository": "https://github.com/KhronosGroup/WebGL",
+    "revision": "714857a28445e8f5d8d6ae1c78498578009534d8",
+    "files": {
+      "webgl.idl": {
+        "url": "https://raw.githubusercontent.com/KhronosGroup/WebGL/714857a28445e8f5d8d6ae1c78498578009534d8/specs/latest/1.0/webgl.idl",
+        "sha256": "6fd554ada298aadba00674dddf865ecf7ebaeab87b7d9d550bcdd022c626cad3"
+      },
+      "webgl2.idl": {
+        "url": "https://raw.githubusercontent.com/KhronosGroup/WebGL/714857a28445e8f5d8d6ae1c78498578009534d8/specs/latest/2.0/webgl2.idl",
+        "sha256": "6f1a1aa66a5f06c54098d27d8c32ce8683b41657b63a55ac8c1187227c050abf"
+      }
+    }
+  }
+}

@@ -1,0 +1,13 @@
+[package]
+name = "obscura-webgl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+glow = "=0.17.0"
+libloading = "=0.8.9"
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"
