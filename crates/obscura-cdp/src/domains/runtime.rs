@@ -129,6 +129,10 @@ pub async fn handle(
                 });
                 ctx.refresh_runtime_event_collection(&page_id);
                 ctx.ensure_default_context(&page_id);
+                // A client can enable Runtime after the iframe was attached.
+                // Do not require a second Page.frameAttached to discover its
+                // default/utility execution contexts.
+                ctx.ensure_live_frame_contexts(&page_id);
                 if newly_enabled {
                     let events = ctx.contexts_for_page(&page_id)
                         .map(|context| execution_context_created_event(
@@ -805,6 +809,35 @@ mod tests {
                 && p["value"]["subtype"] == "node"
                 && p["value"]["objectId"].as_str()
                     .unwrap_or("").starts_with("frame:1:")));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn runtime_enable_late_session_advertises_live_child_worlds() {
+        let mut ctx = CdpContext::new();
+        let page_id = ctx.create_page();
+        let session = Some("frame-late-runtime".to_string());
+        ctx.sessions.insert(session.clone().unwrap(), page_id.clone());
+        let page = ctx.get_page_mut(&page_id).unwrap();
+        page.resume_js();
+        page.frames.push(obscura_js::frame::FrameRealm::new(
+            page.js.as_mut().unwrap(), 1, 0,
+            "https://child.example/frame",
+            "<html><body><input id='child-input'></body></html>",
+        ).unwrap());
+        handle("enable", &json!({}), &mut ctx, &session).await.unwrap();
+        let contexts = ctx.pending_events.iter().filter(|evt|
+            evt.method == "Runtime.executionContextCreated"
+                && evt.session_id == session
+                && evt.params["context"]["auxData"]["frameId"]
+                    == format!("{page_id}-frame-1")
+        ).collect::<Vec<_>>();
+        assert_eq!(contexts.len(), 1, "late Runtime.enable must advertise child");
+        let id = contexts[0].params["context"]["id"].as_i64().unwrap();
+        let result = handle("evaluate", &json!({
+            "contextId": id, "expression": "document.querySelectorAll('input').length",
+            "returnByValue": true,
+        }), &mut ctx, &session).await.unwrap();
+        assert_eq!(result["result"]["value"], 1);
     }
 
     #[tokio::test]
