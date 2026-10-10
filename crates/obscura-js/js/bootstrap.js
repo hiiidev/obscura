@@ -14638,6 +14638,10 @@ class _Canvas2D {
     this._resetDrawingState();
     // Standalone storage has no DOM node. It must never register or damage a
     // page surface; placeholders are published through a separate native op.
+    if (!this._offscreenOptions &&
+        typeof __obscuraCore.ops.op_canvas_document_epoch === 'function' &&
+        !_canvasDOMOwner(this.canvas))
+      throw new DOMException('Canvas owner is from another document','InvalidStateError');
     const register = this._offscreenOptions ? null : __obscuraCore.ops.op_canvas_register_surface;
     if (typeof register === 'function') {
       // op2 accepts Uint8Array, while Canvas exposes Uint8ClampedArray. This
@@ -15017,7 +15021,17 @@ class _Canvas2D {
   getContextAttributes() { return { alpha: true, desynchronized: false, colorSpace: "srgb", willReadFrequently: false }; }
 }
 
+// Canvas ownership is anchored when the wrapper is created, not on its
+// first getContext call (which might happen after document navigation).
+const _canvasBirthEpoch = new WeakMap();
 class HTMLCanvasElement extends Element {
+  constructor(...args) {
+    super(...args);
+    const epoch = __obscuraCore.ops.op_canvas_document_epoch?.(_realmFrameId);
+    if (Number.isInteger(epoch) && epoch !== 4294967295) {
+      _canvasBirthEpoch.set(this,epoch);
+    }
+  }
   get width() {
     const raw = this.getAttribute('width');
     const parsed = raw === null ? 300 : Number.parseInt(raw, 10);
@@ -15037,6 +15051,8 @@ class HTMLCanvasElement extends Element {
     this.setAttribute('height', Math.max(0, Number(value) || 0));
   }
   setAttribute(name, value) {
+    if (_canvasBirthEpoch.has(this) && !_canvasDOMOwner(this))
+      throw new DOMException('Canvas owner is from another document','InvalidStateError');
     super.setAttribute(name, value);
     const normalized = String(name).toLowerCase();
     if (this._ctx && (normalized === 'width' || normalized === 'height')) {
@@ -15045,6 +15061,8 @@ class HTMLCanvasElement extends Element {
     }
   }
   removeAttribute(name) {
+    if (_canvasBirthEpoch.has(this) && !_canvasDOMOwner(this))
+      throw new DOMException('Canvas owner is from another document','InvalidStateError');
     super.removeAttribute(name);
     const normalized = String(name).toLowerCase();
     if (this._ctx && (normalized === 'width' || normalized === 'height')) {
@@ -15089,6 +15107,8 @@ function _canvasDOMOwner(canvas) {
   const frame = _realmFrameId;
   const epoch = __obscuraCore.ops.op_canvas_document_epoch?.(frame);
   if (!Number.isInteger(epoch) || epoch === 4294967295) return null;
+  const born = _canvasBirthEpoch.get(canvas);
+  if (born !== undefined && born !== epoch) return null;
   _canvasDocumentEpoch = epoch;
   const prev = _canvasDOMOwners.get(canvas);
   if (prev) return prev.frame === frame && prev.epoch === epoch ? prev : null;
@@ -15103,6 +15123,7 @@ const _fpGpuVariance = () => {};
 /* @obscura-webgl */
 
 HTMLCanvasElement.prototype.getContext = function getContext(type, attributes) {
+  if (typeof __obscuraCore.ops.op_canvas_document_epoch === 'function' && !_canvasDOMOwner(this)) return null;
   if (_placeholderHas(this)) throw new DOMException('Canvas control has been transferred','InvalidStateError');
   const normalized = String(type);
   if (normalized === '2d') {
