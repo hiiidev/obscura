@@ -64,7 +64,6 @@ jobs:
       actions: read
     env:
       OBSCURA_WEBGL_BACKEND: hardware
-      OBSCURA_WEBGL_LIB_DIR: ${{ runner.temp }}/angle-smoke/bundle
       NATIVE_RUN_ID: "38054498511"
       NATIVE_HEAD_SHA: "9f53c51b45a861e0e12c90e39c37b5504a829e2e"
     steps:
@@ -109,6 +108,8 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/angle-smoke/venv"
           "$RUNNER_TEMP/angle-smoke/venv/bin/python" -m pip install --disable-pip-version-check playwright==1.55.0
       - name: WebGL1/2 real Metal shaders, pixels, Canvas and screenshot
+        env:
+          OBSCURA_WEBGL_LIB_DIR: ${{ runner.temp }}/angle-smoke/bundle
         run: |
           set -euo pipefail
           root="$RUNNER_TEMP/angle-smoke"
