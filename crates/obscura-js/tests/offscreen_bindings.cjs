@@ -46,8 +46,10 @@ function fixture(options={}) {
       op_canvas_document_epoch(frame){return frame===7 ? generation : 4294967295;},
       op_webgl_image_data(object,data){if(data)imageDataStore.set(object,data);return imageDataStore.get(object)||null;},
       op_posted_task(frame,callback){calls.push({task:true,frame});tasks.push(()=>callback(generation));return generation;},
-      op_canvas_register_surface(frame,epoch,node,width,height,bytes){calls.push({domSurface:node,frame,epoch,width,height});return epoch===generation;},
-      op_canvas_paint_damage(frame,epoch,node){calls.push({domDamage:node,frame,epoch});return epoch===generation;},
+      // The current render-feature ops take (node, dimensions, bytes, frame),
+      // not the older (frame, epoch, node, ...) form used by this fixture.
+      op_canvas_register_surface(node,width,height,bytes,frame){calls.push({domSurface:node,frame,epoch:generation,width,height});return frame===7;},
+      op_canvas_paint_damage(node,frame){calls.push({domDamage:node,frame,epoch:generation});return frame===7;},
       op_canvas_placeholder(frame,epoch,request,bytes){
         calls.push({placeholder:request.kind,frame,request});
         if(epoch!==generation)return{status:'failed',reason:'stale document'};
