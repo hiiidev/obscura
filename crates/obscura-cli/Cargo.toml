@@ -15,6 +15,7 @@ path = "src/worker.rs"
 
 [features]
 default = []
+webgl = ["render", "obscura-browser/webgl", "obscura-cdp/webgl", "obscura-mcp/webgl"]
 stealth = ["obscura-browser/stealth", "obscura-net/stealth", "obscura-mcp/stealth", "obscura-cdp/stealth"]
 render = ["obscura-browser/render", "obscura-cdp/render", "obscura-mcp/render"]
 

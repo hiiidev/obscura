@@ -14988,14 +14988,16 @@ class HTMLCanvasElement extends Element {
     super.setAttribute(name, value);
     const normalized = String(name).toLowerCase();
     if (this._ctx && (normalized === 'width' || normalized === 'height')) {
-      this._ctx._resizeFromCanvas();
+      if (this._ctxKind === '2d') this._ctx._resizeFromCanvas();
+      else _webglResize(this);
     }
   }
   removeAttribute(name) {
     super.removeAttribute(name);
     const normalized = String(name).toLowerCase();
     if (this._ctx && (normalized === 'width' || normalized === 'height')) {
-      this._ctx._resizeFromCanvas();
+      if (this._ctxKind === '2d') this._ctx._resizeFromCanvas();
+      else _webglResize(this);
     }
   }
 }
@@ -15008,11 +15010,35 @@ let _webglCreate = () => null;
 let _webglHas = () => false;
 let _webglResize = () => {};
 let _webglReadback = () => null;
+// Per-document WebGL owner bridge. Native ops validate the document epoch,
+// frame and DOM node before loading or issuing commands to ANGLE.
+let _canvasDocumentEpoch = 0;
+const _canvasDOMOwners = new WeakMap();
+const _canvas2DContext = canvas => canvas._ctxKind === '2d' ? canvas._ctx : null;
+const _canvas2DPixels = ctx => ctx && ctx._buf ?
+  {width:ctx._w,height:ctx._h,bytes:ctx._buf,originClean:ctx._originClean!==false} : null;
+function _canvasDOMOwner(canvas) {
+  if (!canvas || !Number.isInteger(canvas._nid) || _cache.get(canvas._nid) !== canvas) return null;
+  const frame = _realmFrameId;
+  const epoch = __obscuraCore.ops.op_canvas_document_epoch?.(frame);
+  if (!Number.isInteger(epoch) || epoch === 4294967295) return null;
+  _canvasDocumentEpoch = epoch;
+  const prev = _canvasDOMOwners.get(canvas);
+  if (prev) return prev.frame === frame && prev.epoch === epoch ? prev : null;
+  const record = {frame,epoch,node:canvas._nid};
+  _canvasDOMOwners.set(canvas,record);
+  return record;
+}
+// This candidate reports true ANGLE backend capabilities and actual pixels.
+// Experimental seeded readback variance is intentionally disabled.
+const _fpRenderVariance = () => false;
+const _fpGpuVariance = () => {};
 /* @obscura-webgl */
 
 HTMLCanvasElement.prototype.getContext = function getContext(type, attributes) {
   const normalized = String(type);
   if (normalized === '2d') {
+    if (_webglHas(this)) return null;
     if (this._ctxKind && this._ctxKind !== '2d') return null;
     if (!this._ctx) {
       try { this._ctx = new _Canvas2D(this); this._ctxKind = '2d'; }
@@ -15038,6 +15064,11 @@ HTMLCanvasElement.prototype.getContext = function getContext(type, attributes) {
   return null;
 };
 HTMLCanvasElement.prototype.toDataURL = function(type) {
+  if (_webglHas(this)) {
+    const pixels = _webglReadback(this);
+    return pixels && pixels.width && pixels.height ?
+      _encodePNG(pixels.width,pixels.height,pixels.bytes) : 'data:,';
+  }
   const ctx = this._ctx || this.getContext('2d');
   if (ctx && ctx._buf) {
     if (ctx._w === 0 || ctx._h === 0) return 'data:,';

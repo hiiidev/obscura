@@ -29,12 +29,20 @@ use crate::ops::{
 };
 
 #[cfg(feature = "render")]
-struct RuntimeCanvasSurfaceSource<'a>(&'a HashMap<NodeId, crate::ops::CanvasBackingSurface>);
+struct RuntimeCanvasSurfaceSource<'a> {
+    canvas: &'a HashMap<NodeId, crate::ops::CanvasBackingSurface>,
+    #[cfg(feature = "webgl")]
+    webgl: &'a HashMap<NodeId, (u32, u32, Vec<u8>)>,
+}
 
 #[cfg(feature = "render")]
 impl obscura_render::CanvasSurfaceSource for RuntimeCanvasSurfaceSource<'_> {
     fn surface(&self, node: NodeId) -> Option<obscura_render::CanvasSurface<'_>> {
-        let surface = self.0.get(&node)?;
+        #[cfg(feature = "webgl")]
+        if let Some((width, height, pixels)) = self.webgl.get(&node) {
+            return obscura_render::CanvasSurface::from_rgba8(*width, *height, pixels);
+        }
+        let surface = self.canvas.get(&node)?;
         obscura_render::CanvasSurface::from_rgba8(
             surface.width,
             surface.height,
@@ -644,6 +652,8 @@ impl ObscuraJsRuntime {
                 // Empty until a frame realm exists, which is what keeps the
                 // lookup free for pages that have no frames.
                 op_state.put(Rc::new(RefCell::new(crate::ops::RealmStates::default())));
+                #[cfg(feature = "webgl")]
+                op_state.put(crate::webgl_ops::DeferredCleanup::default());
             }
 
             let isolate_handle = runtime.v8_isolate().thread_safe_handle();
@@ -1258,6 +1268,12 @@ impl ObscuraJsRuntime {
             gs.stylesheet_cache = obscura_render::StylesheetCache::default();
             gs.dynamic_fonts.clear();
             gs.canvas_surfaces.clear();
+            #[cfg(feature = "webgl")]
+            {
+                crate::webgl_ops::canvas_placeholder::clear(&mut gs);
+                gs.webgl.entries.clear();
+                gs.webgl_surfaces.clear();
+            }
             gs.scroll_offset = (0.0, 0.0);
             gs.element_scroll_offsets.clear();
             gs.scroll_generation = 0;
@@ -1723,6 +1739,8 @@ impl ObscuraJsRuntime {
             return None;
         }
         with_sync_render_loading_disabled(&mut state, |state| {
+            #[cfg(feature = "webgl")]
+            crate::webgl_ops::prepare_surfaces(state);
             ensure_resolved_scroll(state)?;
             let ObscuraState {
                 dom,
@@ -1730,10 +1748,16 @@ impl ObscuraJsRuntime {
                 render_resources,
                 resolved_scroll,
                 canvas_surfaces,
+                #[cfg(feature = "webgl")]
+                webgl_surfaces,
                 ..
             } = state;
             let (_, scroll) = resolved_scroll.as_ref()?;
-            let canvas_surfaces = RuntimeCanvasSurfaceSource(canvas_surfaces);
+            let canvas_surfaces = RuntimeCanvasSurfaceSource {
+                canvas: canvas_surfaces,
+                #[cfg(feature = "webgl")]
+                webgl: webgl_surfaces,
+            };
             obscura_render::screenshot_prepared_with_scroll_and_surface_color_and_canvas_surfaces(
                 dom.as_ref()?,
                 prepared_render.as_mut()?,
@@ -1794,6 +1818,8 @@ impl ObscuraJsRuntime {
     ) -> Result<obscura_render::Pixmap, obscura_render::CaptureError> {
         let mut state = self.state.borrow_mut();
         with_sync_render_loading_disabled(&mut state, |state| {
+            #[cfg(feature = "webgl")]
+            crate::webgl_ops::prepare_surfaces(state);
             ensure_resolved_scroll(state).ok_or(obscura_render::CaptureError::PaintFailed)?;
             let ObscuraState {
                 dom,
@@ -1801,12 +1827,18 @@ impl ObscuraJsRuntime {
                 render_resources,
                 resolved_scroll,
                 canvas_surfaces,
+                #[cfg(feature = "webgl")]
+                webgl_surfaces,
                 ..
             } = state;
             let (_, scroll) = resolved_scroll
                 .as_ref()
                 .ok_or(obscura_render::CaptureError::PaintFailed)?;
-            let canvas_surfaces = RuntimeCanvasSurfaceSource(canvas_surfaces);
+            let canvas_surfaces = RuntimeCanvasSurfaceSource {
+                canvas: canvas_surfaces,
+                #[cfg(feature = "webgl")]
+                webgl: webgl_surfaces,
+            };
             obscura_render::paint_prepared_region_with_scroll_and_surface_color_and_canvas_surfaces(
                 dom.as_ref()
                     .ok_or(obscura_render::CaptureError::PaintFailed)?,
@@ -1832,6 +1864,8 @@ impl ObscuraJsRuntime {
     ) -> Result<Vec<u8>, obscura_render::CaptureError> {
         let mut state = self.state.borrow_mut();
         with_sync_render_loading_disabled(&mut state, |state| {
+            #[cfg(feature = "webgl")]
+            crate::webgl_ops::prepare_surfaces(state);
             ensure_resolved_scroll(state).ok_or(obscura_render::CaptureError::PaintFailed)?;
             let ObscuraState {
                 dom,
@@ -1839,12 +1873,18 @@ impl ObscuraJsRuntime {
                 render_resources,
                 resolved_scroll,
                 canvas_surfaces,
+                #[cfg(feature = "webgl")]
+                webgl_surfaces,
                 ..
             } = state;
             let (_, scroll) = resolved_scroll
                 .as_ref()
                 .ok_or(obscura_render::CaptureError::PaintFailed)?;
-            let canvas_surfaces = RuntimeCanvasSurfaceSource(canvas_surfaces);
+            let canvas_surfaces = RuntimeCanvasSurfaceSource {
+                canvas: canvas_surfaces,
+                #[cfg(feature = "webgl")]
+                webgl: webgl_surfaces,
+            };
             obscura_render::screenshot_prepared_region_with_scroll_and_backgrounds_and_canvas_surfaces(
                 dom.as_ref()
                     .ok_or(obscura_render::CaptureError::PaintFailed)?,
@@ -1873,6 +1913,8 @@ impl ObscuraJsRuntime {
     ) -> Result<Vec<u8>, obscura_render::CaptureError> {
         let mut state = self.state.borrow_mut();
         with_sync_render_loading_disabled(&mut state, |state| {
+            #[cfg(feature = "webgl")]
+            crate::webgl_ops::prepare_surfaces(state);
             ensure_resolved_scroll(state).ok_or(obscura_render::CaptureError::PaintFailed)?;
             let ObscuraState {
                 dom,
@@ -1880,6 +1922,8 @@ impl ObscuraJsRuntime {
                 render_resources,
                 element_scroll_offsets,
                 canvas_surfaces,
+                #[cfg(feature = "webgl")]
+                webgl_surfaces,
                 ..
             } = state;
             let dom = dom
@@ -1894,7 +1938,11 @@ impl ObscuraJsRuntime {
                     element_scroll_offsets,
                     (region.width, region.height),
                 );
-            let canvas_surfaces = RuntimeCanvasSurfaceSource(canvas_surfaces);
+            let canvas_surfaces = RuntimeCanvasSurfaceSource {
+                canvas: canvas_surfaces,
+                #[cfg(feature = "webgl")]
+                webgl: webgl_surfaces,
+            };
             obscura_render::screenshot_prepared_region_with_scroll_and_backgrounds_and_canvas_surfaces(
                 dom,
                 prepared_render
@@ -1916,6 +1964,8 @@ impl ObscuraJsRuntime {
     pub fn prepared_content_size(&self) -> Option<(f32, f32)> {
         let mut state = self.state.borrow_mut();
         with_sync_render_loading_disabled(&mut state, |state| {
+            #[cfg(feature = "webgl")]
+            crate::webgl_ops::prepare_surfaces(state);
             ensure_resolved_scroll(state)?;
             state
                 .prepared_render
@@ -16128,10 +16178,16 @@ mod tests {
                 render_resources,
                 resolved_scroll,
                 canvas_surfaces,
+                #[cfg(feature = "webgl")]
+                webgl_surfaces,
                 ..
             } = &mut *state;
             let (_, scroll) = resolved_scroll.as_ref().expect("scroll snapshot");
-            let canvas_surfaces = RuntimeCanvasSurfaceSource(canvas_surfaces);
+            let canvas_surfaces = RuntimeCanvasSurfaceSource {
+                canvas: canvas_surfaces,
+                #[cfg(feature = "webgl")]
+                webgl: webgl_surfaces,
+            };
             obscura_render::paint_prepared_with_scroll_and_surface_color_and_canvas_surfaces(
                 dom.as_ref().expect("canvas DOM"),
                 prepared_render.as_mut().expect("prepared canvas layout"),

@@ -11,6 +11,7 @@ name = "integration"
 
 [features]
 default = []
+webgl = ["render", "obscura-browser/webgl"]
 stealth = ["obscura-browser/stealth"]
 # Enable Page.captureScreenshot via obscura-render. Propagates render to
 # obscura-browser so Page::screenshot is available.

@@ -295,6 +295,20 @@ impl RenderResourceCache {
     /// Whether this URL currently retains usable bytes (as opposed to a
     /// short-lived negative-cache entry). Profile-specific HTML image loads
     /// use this to avoid replacing paint bytes from another credential mode.
+    /// Safe cache-only source for WebGL DOM pixel uploads. Until request-level
+    /// CORS origin metadata is plumbed into the resource cache, only data: URLs
+    /// are marked clean. Other origins fail closed instead of leaking pixels.
+    pub fn cached_image_element_source(
+        &mut self, tree: &DomTree, id: obscura_dom::tree::NodeId,
+        viewport: (f32, f32), base_url: Option<&str>,
+    ) -> Option<(Arc<[u8]>, bool)> {
+        let node = tree.get_node(id)?;
+        if node.as_element()?.local.as_ref() != "img" { return None; }
+        let (src, _) = resolve_img_url(tree, id, viewport)?;
+        if !src.starts_with("data:") { return None; }
+        fetch_bytes(&src, base_url, self).map(|bytes| (bytes, true))
+    }
+
     pub fn has_cached_bytes(&self, url: &str) -> bool {
         matches!(
             self.entries.get(&network_resource_url(url)),

@@ -5,6 +5,8 @@ pub mod markdown;
 pub mod module_loader;
 pub mod ops;
 pub mod runtime;
+#[cfg(feature = "webgl")]
+pub(crate) mod webgl_ops;
 pub mod v8_flags;
 mod write_stream;
 

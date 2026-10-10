@@ -7,6 +7,7 @@ repository.workspace = true
 
 [features]
 default = []
+webgl = ["render", "dep:obscura-webgl"]
 # Builds obscura-net with its stealth (wreq) HTTP client and lets scripted
 # fetch()/XHR be routed through it so JS-level requests carry the same Chrome
 # TLS fingerprint and client hints as stealth navigation.
@@ -52,3 +53,4 @@ hkdf = "0.12"
 # CSPRNG for getRandomValues / randomUUID (replaces Math.random).
 getrandom = "0.2"
 obscura-render = { workspace = true, optional = true }
+obscura-webgl = { workspace = true, optional = true }

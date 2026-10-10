@@ -7,6 +7,7 @@ repository.workspace = true
 
 [features]
 default = []
+webgl = ["render", "obscura-browser/webgl"]
 stealth = ["obscura-browser/stealth", "obscura-net/stealth"]
 render = ["obscura-browser/render", "dep:base64"]
 

@@ -36,5 +36,18 @@ jobs:
       - name: ANGLE JS binding/Canvas integration gate (pending)
         if: ${{ false }}
         run: node --test crates/obscura-js/tests/webgl_bindings.cjs crates/obscura-js/tests/offscreen_bindings.cjs
-      - name: Verify existing macOS ARM64 baseline remains buildable
-        run: cargo build --locked --profile release-dist --target aarch64-apple-darwin -p obscura-cli --bins --features render
+      - name: Compile native ANGLE WebGL bindings into Apple Silicon browser
+        run: cargo build --locked --profile release-dist --target aarch64-apple-darwin -p obscura-cli --bins --features webgl
+      - name: Package Apple Silicon ANGLE integration candidate (native bundle separate)
+        run: |
+          tar -czf obscura-aarch64-macos-angle-candidate.tar.gz -C target/aarch64-apple-darwin/release-dist obscura obscura-worker
+          shasum -a 256 obscura-aarch64-macos-angle-candidate.tar.gz > SHA256SUMS.txt
+      - name: Upload opt-in ANGLE candidate (not a Release)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: obscura-aarch64-macos-angle-integration
+          path: |
+            obscura-aarch64-macos-angle-candidate.tar.gz
+            SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14

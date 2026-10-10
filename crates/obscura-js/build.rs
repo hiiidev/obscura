@@ -3,6 +3,7 @@ use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-changed=js/bootstrap.js");
+    println!("cargo:rerun-if-changed=js/webgl.js");
     println!("cargo:rerun-if-changed=build.rs");
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
@@ -13,7 +14,13 @@ fn main() {
     let host = std::env::var("HOST").unwrap_or_default();
     let is_cross = target != host;
 
-    let bootstrap_js = include_str!("js/bootstrap.js");
+    let bootstrap_js: &'static str = if cfg!(feature = "webgl") {
+        Box::leak(include_str!("js/bootstrap.js")
+            .replace("/* @obscura-webgl */", include_str!("js/webgl.js"))
+            .into_boxed_str())
+    } else {
+        include_str!("js/bootstrap.js")
+    };
 
     if is_cross {
         // Cross-compilation: the host V8 (linked into this build script) produces

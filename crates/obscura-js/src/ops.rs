@@ -346,6 +346,10 @@ pub struct ObscuraState {
     /// updates this resource independently of retained style/layout geometry.
     #[cfg(feature = "render")]
     pub(crate) canvas_surfaces: HashMap<NodeId, CanvasBackingSurface>,
+    #[cfg(feature = "webgl")]
+    pub(crate) webgl: crate::webgl_ops::Contexts,
+    #[cfg(feature = "webgl")]
+    pub(crate) webgl_surfaces: HashMap<NodeId, (u32, u32, Vec<u8>)>,
     #[cfg(feature = "render")]
     pub viewport: (f32, f32),
     /// Root scrolling offset in CSS pixels. With render enabled this is
@@ -520,6 +524,10 @@ impl ObscuraState {
             dynamic_fonts: Vec::new(),
             #[cfg(feature = "render")]
             canvas_surfaces: HashMap::new(),
+            #[cfg(feature = "webgl")]
+            webgl: crate::webgl_ops::Contexts::default(),
+            #[cfg(feature = "webgl")]
+            webgl_surfaces: HashMap::new(),
             #[cfg(feature = "render")]
             viewport: (1280.0, 720.0),
             #[cfg(feature = "render")]
@@ -7001,6 +7009,21 @@ fn op_canvas_paint_damage(state: &OpState, nid: u32, frame_id: u32) -> bool {
     connected
 }
 
+// WebGL canvas owners are bound to one document generation, not merely a
+// DOM node ID: a previously navigated page must not reuse a native context.
+#[cfg(feature = "webgl")]
+pub(crate) fn canvas_owner_matches(state: &ObscuraState, frame: u32, epoch: u32) -> bool {
+    state.frame_id == frame && (state.document_generation as u32) == epoch
+}
+
+#[cfg(feature = "webgl")]
+#[op2(fast)]
+fn op_canvas_document_epoch(state: &OpState, frame: u32) -> u32 {
+    let shared = frame_state(state, frame);
+    let Ok(state) = shared.try_borrow() else { return u32::MAX };
+    if state.frame_id == frame { state.document_generation as u32 } else { u32::MAX }
+}
+
 pub fn build_extension() -> Extension {
     let mut ops = vec![
         op_dom(),
@@ -7085,6 +7108,11 @@ pub fn build_extension() -> Extension {
         ops.push(op_scroll_to());
         ops.push(op_waapi_create());
         ops.push(op_waapi_control());
+    }
+    #[cfg(feature = "webgl")]
+    {
+        ops.push(op_canvas_document_epoch());
+        ops.extend(crate::webgl_ops::declarations());
     }
     Extension {
         name: "obscura_dom",
