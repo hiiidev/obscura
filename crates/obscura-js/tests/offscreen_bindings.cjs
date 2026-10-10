@@ -43,6 +43,7 @@ function fixture(options={}) {
     _eventTargetRemove(target,type,callback){const list=listeners.get(target)||[];const i=list.findIndex(x=>x.type===type&&x.callback===callback);if(i>=0)list.splice(i,1);},
     _eventTargetDispatch(target,event){event.target=target;for(const item of [...(listeners.get(target)||[])])if(item.type===event.type)item.callback.call(target,event);return !event.defaultPrevented;},
     __obscuraCore:{ops:{
+      op_canvas_document_epoch(frame){return frame===7 ? generation : 4294967295;},
       op_webgl_image_data(object,data){if(data)imageDataStore.set(object,data);return imageDataStore.get(object)||null;},
       op_posted_task(frame,callback){calls.push({task:true,frame});tasks.push(()=>callback(generation));return generation;},
       op_canvas_register_surface(frame,epoch,node,width,height,bytes){calls.push({domSurface:node,frame,epoch,width,height});return epoch===generation;},
