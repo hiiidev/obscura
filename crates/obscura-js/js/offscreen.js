@@ -13,7 +13,14 @@ function offscreenPngBytes(width,height,bytes) {
 function _canvas2DTake(context) {
   const pixels = _canvas2DPixels(context);
   const result = {...pixels,bytes:pixels.bytes.slice()};
-  context._resizeFromCanvas();
+  // Bitmap transfer consumes pixels, not the drawing state. A subsequent
+  // resize is what resets styles and the transformation stack.
+  context._buf.fill(0);
+  if (context._offscreenOptions?.alpha === false) {
+    for(let i=3;i<context._buf.length;i+=4)context._buf[i]=255;
+  }
+  context._originClean = true;
+  schedulePlaceholder(context.canvas);
   return result;
 }
 function offscreenState(receiver) {
@@ -207,6 +214,18 @@ function schedulePlaceholder(canvas) {
 }
 // Only this native adapter can publish the private WebGL presentation hook.
 scheduleOffscreenPresentation = schedulePlaceholder;
+// The outer Canvas2D renderer knows only this private callback, not resource
+// maps or page-owned object properties.
+_canvasPrivateImageSource = source => {
+  const offscreen=offscreens.get(source);
+  if(offscreen)return offscreenPixels(source,true);
+  const bitmap=bitmaps.get(source);
+  if(bitmap){
+    if(!bitmap.bytes)throw new DOMException('Detached ImageBitmap','InvalidStateError');
+    return bitmap;
+  }
+  return null;
+};
 function presentPlaceholder(reference) {
   const canvas=reference.deref(),current=canvas&&offscreens.get(canvas);
   if(!current)return;
