@@ -115,7 +115,9 @@
         zone = null;
         formatter = null;
       }
-      globalThis.__obscura_tz = zone || '';
+      Object.defineProperty(globalThis, '__obscura_tz', {
+        value: zone || '', writable: true, configurable: true, enumerable: false,
+      });
     },
   });
 })();
