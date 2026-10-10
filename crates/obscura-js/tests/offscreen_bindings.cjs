@@ -13,7 +13,7 @@ const canvas=bootstrap.slice(bootstrap.indexOf('const _MAX_CANVAS_DIMENSION'),bo
 // The canvas fixture already contains the HTMLCanvasElement class. Append
 // only the methods installed after the optional WebGL injection marker.
 const htmlCanvasStart=bootstrap.indexOf('HTMLCanvasElement.prototype.getContext =',bootstrap.indexOf('/* @obscura-webgl */'));
-const htmlCanvasEnd=bootstrap.indexOf('Element.prototype.getBBox =',htmlCanvasStart);
+const htmlCanvasEnd=bootstrap.indexOf('Element.prototype.attachShadow =',htmlCanvasStart);
 assert.ok(htmlCanvasStart>=0&&htmlCanvasEnd>htmlCanvasStart,'HTML canvas fixture boundaries must include the implementation');
 const htmlCanvas=bootstrap.slice(htmlCanvasStart,htmlCanvasEnd);
 const bindings=read('webgl.js').replace('/* @obscura-imagedata */',read('imagedata.js')).replace('/* @obscura-imagebitmap */',read('imagebitmap.js')).replace('/* @obscura-offscreen */',read('offscreen.js'));
