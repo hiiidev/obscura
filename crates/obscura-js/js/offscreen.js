@@ -1,8 +1,7 @@
 // Included only with real graphics support. Standalone ownership never creates
 // a hidden DOM element, and construction itself allocates no graphics backend.
 // The same private closure owns ImageBitmap, WebGL and OffscreenCanvas. Never
-// let page code swap out the native Blob class used for bitmap export.
-const NativeBlob = Blob;
+// Reuse the native Blob constructor retained by the ImageBitmap adapter.
 function offscreenPngBytes(width,height,bytes) {
   const dataURL = _encodePNG(width,height,bytes);
   const encoded = dataURL.split(',',2)[1];
