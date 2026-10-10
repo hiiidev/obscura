@@ -107,7 +107,7 @@ jobs:
           set -euo pipefail
           python3 -m venv "$RUNNER_TEMP/angle-smoke/venv"
           "$RUNNER_TEMP/angle-smoke/venv/bin/python" -m pip install --disable-pip-version-check playwright==1.55.0
-      - name: WebGL1/2 real Metal shaders, pixels, Canvas and screenshot
+      - name: WebGL1/2 core Metal shaders, pixels, Canvas and screenshot
         env:
           OBSCURA_WEBGL_LIB_DIR: ${{ runner.temp }}/angle-smoke/bundle
         run: |
@@ -133,9 +133,37 @@ jobs:
           done
           test "$ready" -eq 1 || { echo "Obscura CDP server never became ready"; exit 1; }
           "$root/venv/bin/python" render-repros/webgl/run.py \
-            --endpoint http://127.0.0.1:9333 --out "$root/captures/metal-1"
+            --endpoint http://127.0.0.1:9333 --out "$root/captures/metal-core-1" --scope core
           "$root/venv/bin/python" render-repros/webgl/run.py \
-            --endpoint http://127.0.0.1:9333 --out "$root/captures/metal-2"
+            --endpoint http://127.0.0.1:9333 --out "$root/captures/metal-core-2" --scope core
+      # Keep optional canvas transfer failures distinct from Metal WebGL core.
+      # This is a required-but-pending acceptance gate, not a known-green test.
+      - name: OffscreenCanvas placeholder and SVG presentation acceptance
+        env:
+          OBSCURA_WEBGL_LIB_DIR: ${{ runner.temp }}/angle-smoke/bundle
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/angle-smoke"
+          "$root/browser/obscura" --allow-private-network serve \
+            --host 127.0.0.1 --port 9334 --storage-dir "$root/offscreen-profile" \
+            > "$root/logs/obscura-offscreen.log" 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
+          ready=0
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:9334/json/version > "$root/logs/offscreen-cdp-version.json"; then
+              ready=1
+              break
+            fi
+            if ! kill -0 "$pid" 2>/dev/null; then
+              cat "$root/logs/obscura-offscreen.log"
+              exit 1
+            fi
+            sleep 1
+          done
+          test "$ready" -eq 1 || { echo "Offscreen test CDP server not ready"; exit 1; }
+          "$root/venv/bin/python" render-repros/webgl/run.py \
+            --endpoint http://127.0.0.1:9334 --out "$root/captures/metal-presentation" --scope presentation
       - name: Preserve Metal validation evidence even on failure
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -146,3 +174,17 @@ jobs:
             ${{ runner.temp }}/angle-smoke/captures/
           if-no-files-found: warn
           retention-days: 14
+
+  js-webgl-bindings:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Verify standalone WebGL JavaScript binding semantics
+        run: |
+          node --version
+          node --test crates/obscura-js/tests/webgl_bindings.cjs
