@@ -913,13 +913,14 @@ impl ObscuraJsRuntime {
     ) {
         use deno_core::v8;
 
-        const IDENTITY_GLOBALS: [&str; 8] = [
+        const IDENTITY_GLOBALS: [&str; 9] = [
             "__obscura_ua",
             "__obscura_platform",
             "__obscura_ua_platform",
             "__obscura_ua_platform_version",
             "__obscura_stealth",
             "__obscura_fp_seed",
+            "__obscura_tz",
             "__obscura_geo_lat",
             "__obscura_geo_lon",
         ];
@@ -1424,6 +1425,19 @@ impl ObscuraJsRuntime {
                 js_string_literal(locale)
             ),
         );
+    }
+
+    /// Apply a timezone to this V8 realm only, leaving process TZ and every
+    /// other BrowserContext untouched. Reapply after page navigation.
+    pub fn set_timezone_override(&mut self, timezone: &str) -> Result<(), String> {
+        self.execute_script("<timezone-shim>", include_str!("../js/timezone.js"))?;
+        self.execute_script(
+            "<timezone-override>",
+            &format!(
+                "globalThis.__obscura_setTimezoneOverride({});",
+                js_string_literal(timezone),
+            ),
+        )
     }
 
     pub fn set_platform(&mut self, platform: &str, ua_platform: &str, ua_platform_version: &str) {
