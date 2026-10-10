@@ -14593,6 +14593,8 @@ globalThis.__ariaQuerySelector = function(root, selector) { return null; };
 globalThis.__ariaQuerySelectorAll = async function*(root, selector) { /* yields nothing */ };
 const _MAX_CANVAS_DIMENSION = 32767;
 const _MAX_CANVAS_PIXELS = 67108864;
+// Implemented by the private WebGL/Offscreen adapter, never by page objects.
+let _canvasPrivateImageSource = () => null;
 class _Canvas2D {
   constructor(canvas, options = null) {
     this.canvas = canvas;
@@ -14630,6 +14632,9 @@ class _Canvas2D {
     this._buf = new Uint8ClampedArray(this._w * this._h * 4);
     // HTML and Offscreen resize replace tainted storage with a clean bitmap.
     this._originClean = true;
+    if (this._offscreenOptions?.alpha === false) {
+      for (let i=3;i<this._buf.length;i+=4) this._buf[i]=255;
+    }
     this._resetDrawingState();
     // Standalone storage has no DOM node. It must never register or damage a
     // page surface; placeholders are published through a separate native op.
@@ -14689,6 +14694,7 @@ class _Canvas2D {
       this._buf[idx+2] = Math.round(b * alpha + this._buf[idx+2] * (1 - alpha));
       this._buf[idx+3] = Math.min(255, Math.round(a * alpha + this._buf[idx+3] * (1 - alpha)));
     }
+    if (this._offscreenOptions?.alpha === false) this._buf[idx+3]=255;
   }
   fillRect(x, y, w, h) {
     const style = this._resolvePaint(this.fillStyle);
@@ -14706,7 +14712,8 @@ class _Canvas2D {
     for (let py = Math.max(0,y); py < Math.min(this._h, y+h); py++) {
       for (let px = Math.max(0,x); px < Math.min(this._w, x+w); px++) {
         const idx = (py * this._w + px) * 4;
-        this._buf[idx] = this._buf[idx+1] = this._buf[idx+2] = this._buf[idx+3] = 0;
+        this._buf[idx] = this._buf[idx+1] = this._buf[idx+2] = 0;
+        this._buf[idx+3] = this._offscreenOptions?.alpha === false ? 255 : 0;
       }
     }
     this._markPaintDamage();
@@ -14797,25 +14804,43 @@ class _Canvas2D {
   }
   createImageData(w, h) { return { data: new Uint8ClampedArray(w*h*4), width: w, height: h }; }
   drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh) {
-    // This CPU canvas only implements canvas-to-canvas image copying.
-    // Unverified image and bitmap sources must fail closed until their CORS
-    // metadata and decoded pixels are available through the browser cache.
+    // Copy pixels from privately branded Canvas, OffscreenCanvas and Bitmap
+    // sources. Unsupported image formats are deliberately not treated clean.
+    let source = null;
     if (img && img._ctx && img._ctx._buf) {
-      if (img._ctx._originClean === false) this._originClean = false;
-      const src = img._ctx;
-      dx = dx ?? sx; dy = dy ?? sy; dw = dw ?? (sw ?? src._w); dh = dh ?? (sh ?? src._h);
-      for (let py = 0; py < dh; py++) {
-        for (let px = 0; px < dw; px++) {
-          const srcX = Math.floor((sx||0) + px * (sw||src._w) / dw);
-          const srcY = Math.floor((sy||0) + py * (sh||src._h) / dh);
-          if (srcX >= 0 && srcX < src._w && srcY >= 0 && srcY < src._h) {
-            const srcIdx = (srcY * src._w + srcX) * 4;
-            this._setPixel(dx+px, dy+py, src._buf[srcIdx], src._buf[srcIdx+1], src._buf[srcIdx+2], src._buf[srcIdx+3]);
-          }
-        }
-      }
+      source = {width:img._ctx._w,height:img._ctx._h,bytes:img._ctx._buf,
+                originClean:img._ctx._originClean !== false};
+    } else if (_placeholderHas(img)) {
+      source = _placeholderPixels(img,true);
+    } else {
+      source = _canvasPrivateImageSource(img);
     }
-    if (!(img && img._ctx && img._ctx._buf)) this._originClean = false;
+    if (!source) {
+      this._originClean = false;
+      this._markPaintDamage();
+      return;
+    }
+    if (source.originClean === false) this._originClean = false;
+    const sourceWidth=source.width,sourceHeight=source.height;
+    if (arguments.length <= 3) {
+      dx=sx;dy=sy;sx=0;sy=0;sw=sourceWidth;sh=sourceHeight;
+      dw=sourceWidth;dh=sourceHeight;
+    } else if (arguments.length <= 5) {
+      dx=sx;dy=sy;dw=sw;dh=sh;sx=0;sy=0;sw=sourceWidth;sh=sourceHeight;
+    }
+    dx=Math.trunc(Number(dx)||0);dy=Math.trunc(Number(dy)||0);
+    dw=Math.trunc(Number(dw)||0);dh=Math.trunc(Number(dh)||0);
+    if (dw<=0||dh<=0||!Number.isFinite(dw)||!Number.isFinite(dh)) return;
+    // A source and destination may be the same canvas; freeze source pixels
+    // before any writes, or overlapping copies cascade into each other.
+    const bytes=source.bytes.buffer===this._buf.buffer?source.bytes.slice():source.bytes;
+    for(let py=0;py<dh;py++)for(let px=0;px<dw;px++) {
+      const x=Math.floor(Number(sx)+px*Number(sw)/dw);
+      const y=Math.floor(Number(sy)+py*Number(sh)/dh);
+      if(x<0||y<0||x>=sourceWidth||y>=sourceHeight)continue;
+      const offset=(y*sourceWidth+x)*4;
+      this._setPixel(dx+px,dy+py,bytes[offset],bytes[offset+1],bytes[offset+2],bytes[offset+3]);
+    }
     this._markPaintDamage();
   }
   beginPath() { this._path = []; }
