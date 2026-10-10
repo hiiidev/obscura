@@ -15001,21 +15001,32 @@ class HTMLCanvasElement extends Element {
 }
 globalThis.HTMLCanvasElement = HTMLCanvasElement;
 
-HTMLCanvasElement.prototype.getContext = function getContext(type) {
-  if (type === '2d') {
+/* __OBSCURA_SOFTWARE_WEBGL__ */
+
+HTMLCanvasElement.prototype.getContext = function getContext(type, attributes) {
+  const normalized = String(type);
+  if (normalized === '2d') {
+    if (this._ctxKind && this._ctxKind !== '2d') return null;
     if (!this._ctx) {
-      try { this._ctx = new _Canvas2D(this); }
+      try { this._ctx = new _Canvas2D(this); this._ctxKind = '2d'; }
       catch (_error) { return null; }
     }
     return this._ctx;
   }
-  if (type === 'webgl' || type === 'experimental-webgl' || type === 'webgl2') {
-    // Context creation is allowed to fail, and that is the only truthful
-    // behavior until the renderer has a real WebGL backend. The former shim
-    // reported successful shader/program creation while every draw call was a
-    // no-op. Feature-detecting applications consequently selected their WebGL
-    // path, hid their HTML/image fallback, and produced a blank canvas.
-    return null;
+  if (normalized === 'webgl' || normalized === 'experimental-webgl'
+      || normalized === 'webgl2') {
+    const kind = normalized === 'webgl2' ? 'webgl2' : 'webgl';
+    // A canvas cannot hold WebGL1, WebGL2, and 2D contexts simultaneously.
+    if (this._ctxKind && this._ctxKind !== kind) return null;
+    if (!this._ctx) {
+      try {
+        this._ctx = kind === 'webgl2'
+          ? new globalThis.WebGL2RenderingContext(this, attributes || {})
+          : new globalThis.WebGLRenderingContext(this, attributes || {});
+        this._ctxKind = kind;
+      } catch (_error) { return null; }
+    }
+    return this._ctx;
   }
   return null;
 };
