@@ -15619,6 +15619,26 @@ globalThis.Worker = class Worker {
     };
     // Scripts execute in a shadowing environment, not directly in the
     // page Window. Keep the visible WorkerGlobalScope free of DOM properties.
+    // DedicatedWorkerGlobalScope inherits the standard ECMAScript globals,
+    // but never Window-only DOM interfaces. A plain object scope has no own
+    // Reflect / Math / JSON, and self.Math is otherwise undefined even though
+    // bare Math would resolve through the page's global environment.
+    for (const name of [
+      'Reflect', 'Math', 'JSON', 'Object', 'Function', 'Array', 'Boolean',
+      'String', 'Number', 'BigInt', 'Symbol', 'RegExp', 'Date', 'Promise',
+      'Map', 'Set', 'WeakMap', 'WeakSet', 'WeakRef', 'FinalizationRegistry',
+      'Error', 'EvalError', 'RangeError', 'ReferenceError', 'SyntaxError',
+      'TypeError', 'URIError', 'AggregateError', 'ArrayBuffer',
+      'SharedArrayBuffer', 'DataView', 'Uint8Array', 'Int8Array',
+      'Uint8ClampedArray', 'Uint16Array', 'Int16Array', 'Uint32Array',
+      'Int32Array', 'Float32Array', 'Float64Array', 'BigInt64Array',
+      'BigUint64Array', 'Atomics', 'Intl', 'WebAssembly',
+      'parseInt', 'parseFloat', 'isNaN', 'isFinite', 'eval',
+      'encodeURI', 'encodeURIComponent', 'decodeURI',
+      'decodeURIComponent', 'escape', 'unescape',
+    ]) {
+      if (name in globalThis) scope[name] = globalThis[name];
+    }
     scope.self = scope;
     scope.globalThis = scope;
     worker._evalScope = Object.assign(Object.create(scope), {
