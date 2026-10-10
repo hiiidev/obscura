@@ -15001,7 +15001,14 @@ class HTMLCanvasElement extends Element {
 }
 globalThis.HTMLCanvasElement = HTMLCanvasElement;
 
-/* __OBSCURA_SOFTWARE_WEBGL__ */
+// Native ANGLE hooks are opt-in. A render-only build has no graphics
+// context and must not return a WebGL object with nonfunctional methods.
+// The native WebGL binding replaces these hooks when the feature is enabled.
+let _webglCreate = () => null;
+let _webglHas = () => false;
+let _webglResize = () => {};
+let _webglReadback = () => null;
+/* @obscura-webgl */
 
 HTMLCanvasElement.prototype.getContext = function getContext(type, attributes) {
   const normalized = String(type);
@@ -15020,9 +15027,9 @@ HTMLCanvasElement.prototype.getContext = function getContext(type, attributes) {
     if (this._ctxKind && this._ctxKind !== kind) return null;
     if (!this._ctx) {
       try {
-        this._ctx = kind === 'webgl2'
-          ? new globalThis.WebGL2RenderingContext(this, attributes || {})
-          : new globalThis.WebGLRenderingContext(this, attributes || {});
+        const nativeContext = _webglCreate(this, normalized, attributes || {});
+        if (!nativeContext) return null;
+        this._ctx = nativeContext;
         this._ctxKind = kind;
       } catch (_error) { return null; }
     }
