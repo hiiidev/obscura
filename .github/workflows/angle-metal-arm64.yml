@@ -51,3 +51,97 @@ jobs:
             SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 14
+
+  # This job uses the browser built by the same run and the native dylibs
+  # from the successful pinned builder on its separate isolation branch.
+  # A green Rust-only build is not sufficient to verify native WebGL.
+  native-metal-smoke:
+    needs: angle-core
+    runs-on: macos-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      actions: read
+    env:
+      OBSCURA_WEBGL_BACKEND: hardware
+      OBSCURA_WEBGL_LIB_DIR: ${{ runner.temp }}/angle-smoke/bundle
+      NATIVE_RUN_ID: "38054498511"
+      NATIVE_HEAD_SHA: "9f53c51b45a861e0e12c90e39c37b5504a829e2e"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Verify host and download both successful build artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          root="$RUNNER_TEMP/angle-smoke"
+          mkdir -p "$root/downloads/browser" "$root/downloads/angle" "$root/browser" "$root/bundle" "$root/logs" "$root/captures"
+          printf 'candidate=%s\nnative_run=%s\nnative_head=%s\nhost=%s\n' \
+            "$GITHUB_SHA" "$NATIVE_RUN_ID" "$NATIVE_HEAD_SHA" "$(uname -m)" > "$root/logs/identity.txt"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$NATIVE_RUN_ID" --jq .head_sha)" = "$NATIVE_HEAD_SHA"
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name obscura-aarch64-macos-angle-integration --dir "$root/downloads/browser"
+          gh run download "$NATIVE_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name angle-metal-aarch64-macos-pinned-bundle --dir "$root/downloads/angle"
+          (cd "$root/downloads/browser" && shasum -a 256 -c SHA256SUMS.txt)
+          (cd "$root/downloads/angle" && shasum -a 256 -c ANGLE-METAL-SHA256SUMS.txt)
+          tar -xzf "$root/downloads/browser/obscura-aarch64-macos-angle-candidate.tar.gz" -C "$root/browser"
+          tar -xzf "$root/downloads/angle/angle-metal-aarch64-macos.tar.gz" -C "$root/bundle"
+          test -s "$root/bundle/bundle.json"
+          test -s "$root/bundle/libEGL.dylib"
+          test -s "$root/bundle/libGLESv2.dylib"
+          for executable in "$root/browser/obscura" "$root/browser/obscura-worker"; do
+            test -x "$executable"
+            lipo -archs "$executable" | grep -qw arm64
+          done
+          for library in "$root/bundle/libEGL.dylib" "$root/bundle/libGLESv2.dylib"; do
+            lipo -archs "$library" | grep -qw arm64
+          done
+          shasum -a 256 "$root/browser/"* "$root/bundle/"*.dylib >> "$root/logs/identity.txt"
+          python3 -m json.tool "$root/bundle/bundle.json" > "$root/logs/bundle.json"
+          sw_vers >> "$root/logs/identity.txt"
+      - name: Install pinned Playwright driver for CDP validation
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/angle-smoke/venv"
+          "$RUNNER_TEMP/angle-smoke/venv/bin/python" -m pip install --disable-pip-version-check playwright==1.55.0
+      - name: WebGL1/2 real Metal shaders, pixels, Canvas and screenshot
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/angle-smoke"
+          "$root/browser/obscura" --allow-private-network serve \
+            --host 127.0.0.1 --port 9333 --storage-dir "$root/profile" \
+            > "$root/logs/obscura-server.log" 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
+          ready=0
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:9333/json/version > "$root/logs/cdp-version.json"; then
+              ready=1
+              break
+            fi
+            if ! kill -0 "$pid" 2>/dev/null; then
+              echo "Obscura CDP server exited before readiness"
+              cat "$root/logs/obscura-server.log"
+              exit 1
+            fi
+            sleep 1
+          done
+          test "$ready" -eq 1 || { echo "Obscura CDP server never became ready"; exit 1; }
+          "$root/venv/bin/python" render-repros/webgl/run.py \
+            --endpoint http://127.0.0.1:9333 --out "$root/captures/metal-1"
+          "$root/venv/bin/python" render-repros/webgl/run.py \
+            --endpoint http://127.0.0.1:9333 --out "$root/captures/metal-2"
+      - name: Preserve Metal validation evidence even on failure
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: obscura-metal-webgl-runtime-evidence
+          path: |
+            ${{ runner.temp }}/angle-smoke/logs/
+            ${{ runner.temp }}/angle-smoke/captures/
+          if-no-files-found: warn
+          retention-days: 14
