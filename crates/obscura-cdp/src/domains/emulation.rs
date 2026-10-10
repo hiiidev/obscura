@@ -158,6 +158,44 @@ pub async fn handle(
             }
             Ok(json!({}))
         }
+        "setTimezoneOverride" => {
+            let requested = params.get("timezoneId").and_then(Value::as_str)
+                .ok_or("Emulation.setTimezoneOverride requires timezoneId")?;
+            let requested = requested.trim();
+            if requested.len() > 128 || requested.contains('\0') {
+                return Err("Invalid timezoneId".into());
+            }
+            let context_id = {
+                let page = ctx.get_session_page_mut(session_id)
+                    .ok_or("No page for session")?;
+                if !requested.is_empty() {
+                    // Use the realm's ICU/IANA database rather than accepting
+                    // arbitrary strings or changing the process-wide TZ.
+                    let expression = format!(
+                        "(() => {{ try {{ new Intl.DateTimeFormat('en-US', {{timeZone: {}}}); \
+                         return true; }} catch(e) {{ return false; }} }})()",
+                        serde_json::to_string(requested).map_err(|e| e.to_string())?,
+                    );
+                    if page.evaluate(&expression) != json!(true) {
+                        return Err(format!("Invalid timezoneId: {requested}"));
+                    }
+                }
+                page.context.id.clone()
+            };
+            let context = ctx.get_session_page(session_id)
+                .ok_or("No page for session")?.context.clone();
+            context.set_timezone_override(
+                (!requested.is_empty()).then(|| requested.to_string()),
+            );
+            // Every target in this BrowserContext shares its timezone. A
+            // different Context stays untouched, including its child frames.
+            for page in &mut ctx.pages {
+                if page.context.id == context_id {
+                    page.set_timezone_override((!requested.is_empty()).then_some(requested))?;
+                }
+            }
+            Ok(json!({}))
+        }
         "setLocaleOverride" => {
             let locale = params
                 .get("locale")
@@ -179,6 +217,44 @@ pub async fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn timezone_override_is_context_scoped_and_survives_navigation() {
+        let mut ctx = CdpContext::new();
+        let a = ctx.create_browser_context();
+        let b = ctx.create_browser_context();
+        let a_id = ctx.create_page_in_context(Some(&a)).unwrap();
+        let b_id = ctx.create_page_in_context(Some(&b)).unwrap();
+        let sa = Some("tz-a".to_string());
+        let sb = Some("tz-b".to_string());
+        ctx.sessions.insert(sa.clone().unwrap(), a_id);
+        ctx.sessions.insert(sb.clone().unwrap(), b_id);
+
+        handle("setTimezoneOverride", &json!({"timezoneId":"America/New_York"}),
+            &mut ctx, &sa).await.unwrap();
+        handle("setTimezoneOverride", &json!({"timezoneId":"Asia/Tokyo"}),
+            &mut ctx, &sb).await.unwrap();
+
+        let probe = "(function() { const date = new Date('2024-01-15T12:00:00Z'); return [Intl.DateTimeFormat().resolvedOptions().timeZone, date.getHours(), date.getTimezoneOffset()]; })()";
+        assert_eq!(ctx.get_session_page_mut(&sa).unwrap().evaluate(probe),
+            json!(["America/New_York", 7, 300]));
+        assert_eq!(ctx.get_session_page_mut(&sb).unwrap().evaluate(probe),
+            json!(["Asia/Tokyo", 21, -540]));
+        assert_eq!(ctx.get_session_page(&sa).unwrap().context.timezone_override().as_deref(),
+            Some("America/New_York"));
+        assert_eq!(ctx.get_session_page(&sb).unwrap().context.timezone_override().as_deref(),
+            Some("Asia/Tokyo"));
+
+        // The next document gets the same Context preference.
+        ctx.get_session_page_mut(&sa).unwrap().set_html(
+            "<html><body>next</body></html>", "https://example.com/next",
+        );
+        assert_eq!(ctx.get_session_page_mut(&sa).unwrap().evaluate(probe),
+            json!(["America/New_York", 7, 300]));
+        assert!(handle("setTimezoneOverride",
+            &json!({"timezoneId":"Not/A_Zone"}), &mut ctx, &sa).await.is_err());
+    }
 
     #[tokio::test]
     async fn device_metrics_override_updates_page_and_window_viewport() {
