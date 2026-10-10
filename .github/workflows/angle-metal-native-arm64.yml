@@ -1,0 +1,52 @@
+name: ANGLE Metal libraries - macOS ARM64 candidate
+
+# Builds pinned graphics dependencies only; no Obscura Release.
+on:
+  push:
+    branches: [build/angle-metal-native-arm64-candidate]
+    paths:
+      - .github/workflows/angle-metal-native-arm64.yml
+      - graphics/build_dependencies.py
+      - graphics/dependencies.lock.json
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: angle-metal-bundle-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pinned-angle-metal:
+    runs-on: macos-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Confirm native Apple Silicon toolchain and free disk
+        run: |
+          test "$(uname -m)" = "arm64"
+          xcodebuild -version
+          df -h "$RUNNER_TEMP"
+      - name: Compile pinned ANGLE EGL/GLES with Metal backend
+        timeout-minutes: 210
+        run: |
+          python3 graphics/build_dependencies.py             --work-dir "$RUNNER_TEMP/angle-native-build"             --output "$RUNNER_TEMP/angle-metal-aarch64"             --jobs 2
+      - name: Package verified bundle (never a Release)
+        run: |
+          python3 -m json.tool "$RUNNER_TEMP/angle-metal-aarch64/bundle.json" > /dev/null
+          test -s "$RUNNER_TEMP/angle-metal-aarch64/libEGL.dylib"
+          test -s "$RUNNER_TEMP/angle-metal-aarch64/libGLESv2.dylib"
+          tar -czf angle-metal-aarch64-macos.tar.gz -C "$RUNNER_TEMP/angle-metal-aarch64" .
+          shasum -a 256 angle-metal-aarch64-macos.tar.gz > ANGLE-METAL-SHA256SUMS.txt
+      - name: Upload pinned macOS ARM64 Metal libraries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: angle-metal-aarch64-macos-pinned-bundle
+          path: |
+            angle-metal-aarch64-macos.tar.gz
+            ANGLE-METAL-SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
