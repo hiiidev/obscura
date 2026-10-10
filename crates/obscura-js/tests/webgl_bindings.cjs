@@ -95,9 +95,10 @@ function fixture(options={}) {
   return {sandbox,canvas,gl,calls,tasks,events,native,metadata,states,registrations,retained,finalize,advanceDocument(){sandbox._hostState.documentGeneration=++documentGeneration;},loseNative(id=1){native.get(id).lost=true;tasks.push(lossWatchers.get(id));},drain(){for(let i=0;tasks.length&&i<100;i++)tasks.shift()();assert.equal(tasks.length,0);}};
 }
 test('dirty HTML WebGL commands tolerate absent optional Offscreen presentation hook',()=>{
-  const f=fixture({dirty:operation=>operation.kind==='viewport'});
+  const f=fixture({dirty:operation=>operation.kind==='command'&&operation.value?.method==='viewport'});
   assert.doesNotThrow(()=>f.gl.viewport(0,0,4,3));
-  assert.equal(f.calls.at(-1).operation.kind,'viewport');
+  assert.equal(f.calls.at(-1).operation.kind,'command');
+  assert.equal(f.calls.at(-1).operation.value.method,'viewport');
   const scheduled=[];
   f.sandbox.schedulePlaceholder=canvas=>scheduled.push(canvas);
   f.gl.viewport(0,0,4,3);
