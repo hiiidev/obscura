@@ -243,3 +243,31 @@ async fn imported_worker_script_and_message_handler_do_not_inherit_window_global
     assert_eq!(js.evaluate("__workerScopeResults").unwrap(),
         serde_json::json!([["undefined", "undefined", "undefined", "undefined", true]]));
 }
+
+
+#[tokio::test(flavor = "current_thread")]
+async fn dedicated_worker_exposes_standard_intrinsics_but_not_parent_document() {
+    let mut js = ObscuraJsRuntime::new();
+    js.run_page_init();
+    js.execute_script("dedicated-intrinsics", r#"
+        globalThis.__workerIntrinsics = [];
+        const script = `
+            const list = [
+                self === globalThis, typeof self.Reflect,
+                typeof self.Math, typeof self.JSON, typeof self.Array,
+                typeof self.Promise, typeof self.WebAssembly,
+                typeof document, typeof window,
+                self.Reflect === Reflect, self.Math === Math,
+                self.Math.max(2, 7)
+            ];
+            postMessage(list);
+        `;
+        const url = URL.createObjectURL(new Blob([script], {type:'text/javascript'}));
+        const w = new Worker(url);
+        w.onmessage = event => { __workerIntrinsics.push(event.data); w.terminate(); };
+    "#).unwrap();
+    js.run_event_loop_bounded(100).await.unwrap();
+    assert_eq!(js.evaluate("__workerIntrinsics").unwrap(),
+        serde_json::json!([[true, "object", "object", "object", "function",
+            "function", "object", "undefined", "undefined", true, true, 7]]));
+}
