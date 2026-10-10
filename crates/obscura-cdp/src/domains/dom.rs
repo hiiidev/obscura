@@ -205,17 +205,13 @@ pub async fn handle(
             // Playwright resolves iframe ElementHandles to Frame objects through
             // DOM.describeNode(...).node.frameId. Without this field
             // frameLocator() can find the iframe element but never enter it.
-            let owner_id = if let Some(oid) = params.get("objectId").and_then(Value::as_str) {
-                let literal = crate::util::object_id_literal(oid);
-                page.evaluate(&format!(
-                    "(() => globalThis.__obscura_objects?.[{literal}]?._frameId ?? 0)()",
-                )).as_u64().unwrap_or(0) as u32
-            } else {
-                page.evaluate(&format!(
-                    "(() => Object.values(globalThis.__obscura_frameElements || {{}})                     .find(e => e && e._nid === {})?._frameId ?? 0)()",
-                    node_id,
-                )).as_u64().unwrap_or(0) as u32
-            };
+            // Mapping by the registry key is more reliable than trusting
+            // iframe._frameId on a JS wrapper: wrappers can be refreshed after
+            // DOM mutation while frameElements retains the authoritative ID.
+            let owner_id = page.evaluate(&format!(
+                "(() => {{ const id = Object.keys(globalThis.__obscura_frameElements || {{}})                 .find(id => globalThis.__obscura_frameElements[id]?._nid === {});                 return id ? Number(id) : 0; }})()",
+                node_id,
+            )).as_u64().unwrap_or(0) as u32;
             if owner_id != 0 && page.frames.iter().any(|f| f.frame_id() == owner_id) {
                 node["frameId"] = json!(format!("{}-frame-{owner_id}", page.frame_id));
             }
