@@ -15597,7 +15597,7 @@ globalThis.Worker = class Worker {
           // Use the same worker scope as the parent classic script. Nested
           // blob/data imports are evaluated before the caller resumes.
           const execute = new Function('scope', 'source', 'with (scope) { eval(source); }');
-          execute.call(scope, scope, source);
+          execute.call(scope, worker._evalScope, source);
         }
       },
       crypto: globalThis.crypto,
@@ -15617,7 +15617,16 @@ globalThis.Worker = class Worker {
       performance: globalThis.performance,
       location: globalThis.location,
     };
+    // Scripts execute in a shadowing environment, not directly in the
+    // page Window. Keep the visible WorkerGlobalScope free of DOM properties.
     scope.self = scope;
+    scope.globalThis = scope;
+    worker._evalScope = Object.assign(Object.create(scope), {
+      document: undefined, window: undefined, frames: undefined,
+      parent: undefined, top: undefined, opener: undefined,
+      history: undefined, screen: undefined, localStorage: undefined,
+      sessionStorage: undefined,
+    });
     return scope;
   }
   _autoRun() {
@@ -15627,7 +15636,7 @@ globalThis.Worker = class Worker {
       // Direct eval preserves script directives and resolves bare handler names
       // against the worker scope. Run once so message closures retain their state.
       const fn = new Function('scope', 'source', 'with (scope) { eval(source); }');
-      fn.call(scope, scope, this._code);
+      fn.call(scope, this._evalScope, this._code);
     } catch(e) {
       console.error('Worker error:', e.message);
       if (this.onerror) this.onerror(e);
