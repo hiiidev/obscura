@@ -1688,6 +1688,24 @@ impl Page {
         }
     }
 
+    /// Set timezone in the owning page and all live child realms without
+    /// modifying the process timezone. The owning BrowserContext retains the
+    /// value across navigations and newly created pages.
+    pub fn set_timezone_override(&mut self, timezone: Option<&str>) -> Result<(), String> {
+        let value = timezone.unwrap_or("");
+        if let Some(js) = &mut self.js {
+            js.set_timezone_override(value)?;
+            let expression = format!(
+                "globalThis.__obscura_setTimezoneOverride({});",
+                serde_json::to_string(value).map_err(|error| error.to_string())?,
+            );
+            for frame in &self.frames {
+                frame.execute_script(js, &expression)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn set_locale_override(&mut self, locale: Option<String>) {
         self.locale_override = locale.filter(|locale| !locale.is_empty());
         if let Some(js) = &mut self.js {
@@ -1944,6 +1962,11 @@ impl Page {
         rt.set_fingerprint_seed(self.context.fingerprint_seed);
         if let Some(locale) = &self.locale_override {
             rt.set_locale(locale);
+        }
+        if let Some(timezone) = self.context.timezone_override() {
+            if let Err(error) = rt.set_timezone_override(&timezone) {
+                tracing::warn!("Could not apply context timezone {timezone}: {error}");
+            }
         }
         if let Some((lat, lon)) = env_geolocation() {
             rt.set_geolocation(lat, lon);
