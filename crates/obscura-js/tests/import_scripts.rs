@@ -196,7 +196,7 @@ async fn dedicated_worker_has_no_document_or_window_global() {
             '  locationType: typeof location,',
             '  globalThisIsSelf: globalThis === self',
             '});'
-        ].join('\\n');
+        ].join('\n');
         const workerURL = URL.createObjectURL(new Blob([source], {type:'text/javascript'}));
         const worker = new Worker(workerURL);
         worker.onmessage = event => {
