@@ -155,7 +155,11 @@
     s.lost = reply.lost;
     if (reply.lost) return lostReply(s, kind, value);
     if (!reply.lost && reply.accepted === true) retainReferences(s, kind, value);
-    if (!reply.lost && reply.dirty) schedulePlaceholder(s.canvas);
+    // The optional OffscreenCanvas adapter supplies this hook. Native WebGL
+    // on an HTMLCanvasElement still needs to work when that adapter is absent.
+    if (!reply.lost && reply.dirty && typeof schedulePlaceholder === 'function') {
+      schedulePlaceholder(s.canvas);
+    }
     return reply.value;
   }
   // Per-profile readback variance (see _fpGpuVariance): RGBA8 reads of
