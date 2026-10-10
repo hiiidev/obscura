@@ -15627,6 +15627,16 @@ globalThis.Worker = class Worker {
       history: undefined, screen: undefined, localStorage: undefined,
       sessionStorage: undefined,
     });
+    // Classic worker sources commonly assign bare `onmessage = fn` inside
+    // with(worker._evalScope). Without this bridge, the assignment creates an
+    // own property on the shadowing object while dispatch reads scope.onmessage,
+    // so messages are silently lost.
+    Object.defineProperty(worker._evalScope, 'onmessage', {
+      configurable: true,
+      enumerable: true,
+      get() { return scope.onmessage; },
+      set(fn) { scope.onmessage = fn; },
+    });
     return scope;
   }
   _autoRun() {
