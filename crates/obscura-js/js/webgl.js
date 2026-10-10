@@ -4,6 +4,9 @@
   const contexts = new WeakMap();
   const canvases = new WeakMap();
   const offscreens = new WeakMap();
+  // Optional presentation adapter is private to this closure. Never resolve
+  // page-owned globalThis.schedulePlaceholder when OffscreenCanvas is absent.
+  let scheduleOffscreenPresentation = () => {};
   function canvasSize(canvas) { return offscreens.get(canvas) || canvas; }
   const objects = new WeakMap();
   // Finalizers hold a weak context reference: registering a resource must not
@@ -157,9 +160,7 @@
     if (!reply.lost && reply.accepted === true) retainReferences(s, kind, value);
     // The optional OffscreenCanvas adapter supplies this hook. Native WebGL
     // on an HTMLCanvasElement still needs to work when that adapter is absent.
-    if (!reply.lost && reply.dirty && typeof schedulePlaceholder === 'function') {
-      schedulePlaceholder(s.canvas);
-    }
+    if (!reply.lost && reply.dirty) scheduleOffscreenPresentation(s.canvas);
     return reply.value;
   }
   // Per-profile readback variance (see _fpGpuVariance): RGBA8 reads of
