@@ -316,14 +316,14 @@ impl RenderResourceCache {
     /// resources, allocating pixels, or crossing a document's metadata limit.
     pub fn set_canvas_bitmap_size(
         &mut self, node: obscura_dom::tree::NodeId, width: u32, height: u32,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, &'static str> {
         if width > 32767 || height > 32767
             || u64::from(width) * u64::from(height) > 16_777_216 {
-            return Err("canvas bitmap dimensions exceed budget".into());
+            return Err("canvas bitmap dimensions exceed budget");
         }
         if !self.canvas_bitmap_sizes.contains_key(&node)
             && self.canvas_bitmap_sizes.len() >= 1024 {
-            return Err("canvas placeholder count exceeds budget".into());
+            return Err("canvas placeholder count exceeds budget");
         }
         Ok(self.canvas_bitmap_sizes.insert(node, (width, height))
             != Some((width, height)))
