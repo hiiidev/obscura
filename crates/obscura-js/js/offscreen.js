@@ -1,5 +1,22 @@
 // Included only with real graphics support. Standalone ownership never creates
 // a hidden DOM element, and construction itself allocates no graphics backend.
+// The same private closure owns ImageBitmap, WebGL and OffscreenCanvas. Never
+// let page code swap out the native Blob class used for bitmap export.
+const NativeBlob = Blob;
+function offscreenPngBytes(width,height,bytes) {
+  const dataURL = _encodePNG(width,height,bytes);
+  const encoded = dataURL.split(',',2)[1];
+  if (!encoded) throw new DOMException('Canvas encoding failed','EncodingError');
+  const binary = atob(encoded), output = new Uint8Array(binary.length);
+  for(let i=0;i<binary.length;i++) output[i]=binary.charCodeAt(i);
+  return output;
+}
+function _canvas2DTake(context) {
+  const pixels = _canvas2DPixels(context);
+  const result = {...pixels,bytes:pixels.bytes.slice()};
+  context._resizeFromCanvas();
+  return result;
+}
 function offscreenState(receiver) {
   const value=offscreens.get(receiver);
   if(!value)throw new TypeError('Illegal invocation');
@@ -37,7 +54,10 @@ const encodeOffscreenPNG=_encodePNG;
 class OffscreenCanvas {
   constructor(width,height) {
     if(arguments.length<2)throw new TypeError('OffscreenCanvas requires width and height');
-    offscreens.set(this,{width:offscreenDimension(width),height:offscreenDimension(height),mode:'none',context:null,detached:false,handlers:new Map(),frame:_realmFrameId,epoch:_canvasDocumentEpoch,placeholder:null,presentationQueued:false});
+    const nativeEpoch = __obscuraCore.ops.op_canvas_document_epoch?.(_realmFrameId);
+    const epoch = Number.isInteger(nativeEpoch) && nativeEpoch !== 4294967295
+      ? nativeEpoch : _canvasDocumentEpoch;
+    offscreens.set(this,{width:offscreenDimension(width),height:offscreenDimension(height),mode:'none',context:null,detached:false,handlers:new Map(),frame:_realmFrameId,epoch,placeholder:null,presentationQueued:false});
   }
   get width(){return offscreenState(this).width;}
   set width(value){resizeOffscreen(this,'width',value);}
@@ -112,7 +132,7 @@ class OffscreenCanvas {
     return new Promise((resolve,reject)=>queueContextTask(frame,()=>{
       try {
         // PNG is the required fallback when a requested format is unsupported.
-        resolve(new NativeBlob([encodeOffscreenPNG(snapshot.width,snapshot.height,snapshot.bytes,true)],{type:'image/png'}));
+        resolve(new NativeBlob([offscreenPngBytes(snapshot.width,snapshot.height,snapshot.bytes)],{type:'image/png'}));
       }catch(_error){reject(new DOMException('Canvas encoding failed','EncodingError'));}
     }));
   }
@@ -249,7 +269,7 @@ _placeholderBlob=(canvas,callback,type,quality)=>{
   const record=placeholders.get(canvas);
   queueContextTask(record.frame,()=>{
     let blob=null;
-    try{if(pixels?.width&&pixels.height)blob=new NativeBlob([encodeOffscreenPNG(pixels.width,pixels.height,pixels.bytes,true)],{type:'image/png'});}
+    try{if(pixels?.width&&pixels.height)blob=new NativeBlob([offscreenPngBytes(pixels.width,pixels.height,pixels.bytes)],{type:'image/png'});}
     catch(_error){}
     callback(blob);
   });
