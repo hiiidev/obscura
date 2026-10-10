@@ -44,6 +44,9 @@ pub struct BrowserContext {
     /// this BrowserContext and shared by all pages/documents/frames in it.
     pub fingerprint_seed: u32,
     pub proxy_url: Option<String>,
+    /// Context-owned timezone; never changes the process TZ and never leaks
+    /// between separate Playwright BrowserContexts.
+    timezone_override: Mutex<Option<String>>,
     pub robots_cache: Arc<RobotsCache>,
     pub obey_robots: bool,
     pub stealth: bool,
@@ -193,6 +196,7 @@ impl BrowserContext {
             ua_platform_version,
             fingerprint_seed,
             proxy_url,
+            timezone_override: Mutex::new(None),
             robots_cache: Arc::new(RobotsCache::new()),
             obey_robots: false,
             stealth,
@@ -219,6 +223,16 @@ impl BrowserContext {
 
     pub fn with_proxy(id: String, proxy_url: Option<String>) -> Self {
         Self::with_options(id, proxy_url, false)
+    }
+
+    pub fn timezone_override(&self) -> Option<String> {
+        self.timezone_override.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
+    }
+
+    pub fn set_timezone_override(&self, timezone: Option<String>) {
+        *self.timezone_override.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = timezone;
     }
 
     pub fn effective_proxy_url(&self) -> Option<String> {
@@ -281,6 +295,7 @@ impl BrowserContext {
             ua_platform_version: self.ua_platform_version.clone(),
             fingerprint_seed: next_fingerprint_seed(),
             proxy_url,
+            timezone_override: Mutex::new(self.timezone_override()),
             robots_cache: Arc::new(RobotsCache::new()),
             obey_robots: self.obey_robots,
             stealth: self.stealth,
