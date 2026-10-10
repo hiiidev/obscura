@@ -171,6 +171,8 @@ pub struct RenderResourceCache {
     content_image_intrinsics: HashMap<obscura_dom::tree::NodeId, RememberedContentImageIntrinsic>,
     content_image_intrinsic_order: VecDeque<obscura_dom::tree::NodeId>,
     max_content_image_intrinsics: usize,
+    /// Document-scoped transferred canvas metadata (bounded).
+    canvas_bitmap_sizes: HashMap<obscura_dom::tree::NodeId, (u32, u32)>,
     #[cfg(test)]
     content_image_layout_retries: usize,
     sync_loading_enabled: bool,
@@ -218,6 +220,7 @@ impl RenderResourceCache {
             content_image_intrinsics: HashMap::new(),
             content_image_intrinsic_order: VecDeque::new(),
             max_content_image_intrinsics: max_entries.min(DEFAULT_CONTENT_IMAGE_INTRINSIC_ENTRIES),
+            canvas_bitmap_sizes: HashMap::new(),
             #[cfg(test)]
             content_image_layout_retries: 0,
             sync_loading_enabled: true,
@@ -307,6 +310,27 @@ impl RenderResourceCache {
         let (src, _) = resolve_img_url(tree, id, viewport)?;
         if !src.starts_with("data:") { return None; }
         fetch_bytes(&src, base_url, self).map(|bytes| (bytes, true))
+    }
+
+    /// Track the bitmap dimensions of a transferred canvas without opening
+    /// resources, allocating pixels, or crossing a document's metadata limit.
+    pub fn set_canvas_bitmap_size(
+        &mut self, node: obscura_dom::tree::NodeId, width: u32, height: u32,
+    ) -> Result<bool, String> {
+        if width > 32767 || height > 32767
+            || u64::from(width) * u64::from(height) > 16_777_216 {
+            return Err("canvas bitmap dimensions exceed budget".into());
+        }
+        if !self.canvas_bitmap_sizes.contains_key(&node)
+            && self.canvas_bitmap_sizes.len() >= 1024 {
+            return Err("canvas placeholder count exceeds budget".into());
+        }
+        Ok(self.canvas_bitmap_sizes.insert(node, (width, height))
+            != Some((width, height)))
+    }
+
+    pub fn remove_canvas_bitmap_size(&mut self, node: obscura_dom::tree::NodeId) -> bool {
+        self.canvas_bitmap_sizes.remove(&node).is_some()
     }
 
     pub fn has_cached_bytes(&self, url: &str) -> bool {
@@ -10874,7 +10898,7 @@ fn render_svg_with_font_database(
 /// with SVG-heavy navigation and would be prohibitive for future repeated
 /// frame capture. The embedded faces are the same stable browser-generic
 /// families used by the HTML text engine.
-fn svg_font_database() -> std::sync::Arc<usvg::fontdb::Database> {
+pub(crate) fn svg_font_database() -> std::sync::Arc<usvg::fontdb::Database> {
     static DATABASE: std::sync::OnceLock<std::sync::Arc<usvg::fontdb::Database>> =
         std::sync::OnceLock::new();
     std::sync::Arc::clone(DATABASE.get_or_init(|| {
