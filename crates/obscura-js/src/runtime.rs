@@ -383,6 +383,34 @@ impl Drop for WatchdogToken {
 const SYNCHRONOUS_TASK_FLOOR_MS: u64 = 5_000;
 const WATCHDOG_SCHEDULING_MARGIN_MS: u64 = 500;
 
+/// Autonomous turns run page timers, microtasks and other JS even when CDP is
+/// idle. Permit a bounded additional allowance for costly legitimate work,
+/// but never disable the isolate watchdog (an infinite loop can block all
+/// sessions on the same thread).
+fn autonomous_task_watchdog_ms(raw: Option<&str>) -> u64 {
+    const DEFAULT_MS: u64 = 15_000;
+    const MIN_MS: u64 = 1_000;
+    const MAX_MS: u64 = 60_000;
+    raw.and_then(|s| s.parse::<u64>().ok())
+        .filter(|&n| (MIN_MS..=MAX_MS).contains(&n))
+        .unwrap_or(DEFAULT_MS)
+}
+
+#[cfg(test)]
+mod autonomous_watchdog_config_tests {
+    use super::autonomous_task_watchdog_ms;
+    #[test]
+    fn bounded_autonomous_task_budget() {
+        assert_eq!(autonomous_task_watchdog_ms(None), 15_000);
+        assert_eq!(autonomous_task_watchdog_ms(Some("10000")), 10_000);
+        assert_eq!(autonomous_task_watchdog_ms(Some("60000")), 60_000);
+        assert_eq!(autonomous_task_watchdog_ms(Some("0")), 15_000);
+        assert_eq!(autonomous_task_watchdog_ms(Some("60001")), 15_000);
+        assert_eq!(autonomous_task_watchdog_ms(Some("bogus")), 15_000);
+    }
+}
+
+
 /// A [`JsRuntime`] whose isolate is entered for the duration of one operation.
 ///
 /// V8 requires the isolate that owns a context to be the thread's *current*
@@ -3647,8 +3675,9 @@ impl ObscuraJsRuntime {
     /// asleep waiting for it.
     #[doc(hidden)]
     pub async fn run_autonomous_event_loop_turn(&mut self) -> Result<bool, String> {
-        const AUTONOMOUS_TASK_WATCHDOG_MS: u64 =
-            SYNCHRONOUS_TASK_FLOOR_MS + WATCHDOG_SCHEDULING_MARGIN_MS;
+        let autonomous_watchdog_ms = autonomous_task_watchdog_ms(
+            std::env::var("OBSCURA_AUTONOMOUS_TASK_BUDGET_MS").ok().as_deref(),
+        );
 
         #[cfg(feature = "render")]
         self.service_render_resources();
@@ -3656,7 +3685,7 @@ impl ObscuraJsRuntime {
 
         let checkpoint_watchdog = crate::cdp_watchdog::arm(
             self.isolate_handle(),
-            std::time::Duration::from_millis(AUTONOMOUS_TASK_WATCHDOG_MS),
+            std::time::Duration::from_millis(autonomous_watchdog_ms),
         );
         self.runtime().v8_isolate().perform_microtask_checkpoint();
         if crate::cdp_watchdog::disarm(checkpoint_watchdog) {
@@ -3673,7 +3702,7 @@ impl ObscuraJsRuntime {
             let task_generation = self.state.borrow().animation_task_generation;
             let watchdog = crate::cdp_watchdog::arm(
                 isolate_handle.clone(),
-                std::time::Duration::from_millis(AUTONOMOUS_TASK_WATCHDOG_MS),
+                std::time::Duration::from_millis(autonomous_watchdog_ms),
             );
             let tick = self
                 .runtime()
